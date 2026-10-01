@@ -116,6 +116,42 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 - `affectsEffectiveConfig` 表示该差异当前是否体现在生效配置上：灰度目标版本与生效版本不一致的差异为 `false`。
 - 两个版本相同或差异集合为空时返回 HTTP 200 且 `changedCount` 为 0、`changes` 为空数组。
 
+### `GET /config-item-histories?namespace=...&environment=...&name=...`
+
+单项配置历史查询，纯只读，不新增版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。`name` 原样使用，不裁剪首尾空白。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "name": "timeout",
+  "effectiveVersion": 3,
+  "effectiveItem": {"present": true, "value": "\"30\""},
+  "changes": [
+    {"version": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false}, "changeType": "added", "newValue": "\"30\""},
+    {"version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false}, "changeType": "removed", "oldValue": "\"30\""},
+    {"version": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": 1, "createdAt": "2026-10-01T10:10:00Z", "effective": true}, "changeType": "added", "newValue": "\"30\""}
+  ],
+  "totalChanges": 3
+}
+```
+
+历史语义：
+
+- 每个版本都与同作用域内紧邻的前一个已存版本比较该配置项，`changes` 按版本号升序；灰度发布与回滚版本同样参与比较。
+- 首次出现记 `added`，随后消失记 `removed`，再次出现仍记 `added`，值变化记 `modified`，无变化的版本不列入。
+- `added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；值保持已保存的原始 JSON，比较沿用原样 JSON 语义（数字、布尔、`null`、字符串不转换），仅做对象键排序和空白规范化。
+- 每个 `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`createdAt` 和 `effective`。
+- `effectiveVersion` 是最新全量发布版本号，没有全量发布时为 `null`。
+- `effectiveItem` 描述该配置项在当前生效快照中的状态：存在时为 `{"present": true, "value": <原样 JSON 值>}`，值为 JSON `null` 时 `value` 仍是 `null`；不存在时为 `{"present": false}` 且不返回 `value`。
+- 名称在该作用域从未出现、或只在历史版本中出现但当前不在生效快照中，都返回 HTTP 200：前者 `changes` 为空数组、`totalChanges` 为 0、`effectiveItem.present` 为 `false`，后者正常列出变化。
+- 该入口固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 为空 |
+| 400 | `MISSING_ITEM_NAME` | `name` 缺失或为空字符串（纯空白名称视为非空） |
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。版本差异查询的固定错误结果如下，不会被替换为空差异或静默忽略：

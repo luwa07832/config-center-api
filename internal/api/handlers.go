@@ -159,6 +159,45 @@ func (s *server) handleHistory(c *gin.Context) {
 	})
 }
 
+// handleItemHistory returns the change history of one named item across every version of the
+// scope. It is strictly read-only and never creates a version or changes effective state.
+func (s *server) handleItemHistory(c *gin.Context) {
+	namespace, environment := c.Query("namespace"), c.Query("environment")
+	if namespace == "" || environment == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace and environment are required")
+		return
+	}
+	name := c.Query("name")
+	if name == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_ITEM_NAME", "name is required")
+		return
+	}
+	history, err := s.store.ItemHistory(c.Request.Context(), namespace, environment, name)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	var effectiveValue json.RawMessage
+	effectiveHas := false
+	if effectiveVersion != 0 {
+		for i := len(history) - 1; i >= 0; i-- {
+			if history[i].Version.Version == effectiveVersion {
+				effectiveHas = history[i].HasValue
+				if effectiveHas {
+					effectiveValue = json.RawMessage(history[i].Value)
+				}
+				break
+			}
+		}
+	}
+	c.JSON(http.StatusOK, BuildItemHistory(namespace, environment, name, history, effectiveValue, effectiveHas, effectiveVersion))
+}
+
 // handleVersionSnapshot returns the complete stored snapshot of one historical version. It is
 // strictly read-only: no version is created and no effective, gray or rollback state changes.
 func (s *server) handleVersionSnapshot(c *gin.Context) {

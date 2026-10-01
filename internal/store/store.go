@@ -240,6 +240,47 @@ func (s *Store) Items(ctx context.Context, namespace, environment string, versio
 	return items, nil
 }
 
+// ItemVersionValue pairs one stored version with whether a specific item existed in that
+// version. Value holds the canonical JSON when HasValue is true.
+type ItemVersionValue struct {
+	Version  Version
+	HasValue bool
+	Value    string
+}
+
+// ItemHistory returns every version of a scope paired with the state of one named item in it,
+// ordered by version ascending. Versions without the item are still returned (HasValue is false),
+// so callers can detect removals. It is a single read-only query: gray releases and rollback
+// copies participate exactly like full releases.
+func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name string) ([]ItemVersionValue, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT v.namespace, v.environment, v.version, v.gray_tag, v.rollback_of, v.created_at, i.value_json
+		 FROM config_versions AS v
+		 LEFT JOIN config_items AS i
+		   ON i.namespace = v.namespace AND i.environment = v.environment
+		  AND i.version = v.version AND i.name = ?
+		 WHERE v.namespace = ? AND v.environment = ?
+		 ORDER BY v.version ASC`,
+		name, namespace, environment)
+	if err != nil {
+		return nil, fmt.Errorf("item history: %w", err)
+	}
+	defer rows.Close()
+	history := []ItemVersionValue{}
+	for rows.Next() {
+		var entry ItemVersionValue
+		var value sql.NullString
+		if err := rows.Scan(&entry.Version.Namespace, &entry.Version.Environment, &entry.Version.Version,
+			&entry.Version.GrayTag, &entry.Version.RollbackOf, &entry.Version.CreatedAt, &value); err != nil {
+			return nil, fmt.Errorf("scan item history: %w", err)
+		}
+		entry.HasValue = value.Valid
+		entry.Value = value.String
+		history = append(history, entry)
+	}
+	return history, rows.Err()
+}
+
 // EffectiveVersion returns the latest full-release version of a scope. Gray releases never
 // become effective. 0 means no effective snapshot exists.
 func (s *Store) EffectiveVersion(ctx context.Context, namespace, environment string) (int64, error) {
