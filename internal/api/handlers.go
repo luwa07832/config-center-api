@@ -159,6 +159,40 @@ func (s *server) handleHistory(c *gin.Context) {
 	})
 }
 
+// handleVersionSnapshot returns the complete stored snapshot of one historical version. It is
+// strictly read-only: no version is created and no effective, gray or rollback state changes.
+func (s *server) handleVersionSnapshot(c *gin.Context) {
+	namespace, environment := c.Param("namespace"), c.Param("environment")
+	version, ok := parseVersionParam(c, c.Param("version"))
+	if !ok {
+		return
+	}
+	if !s.versionAvailable(c, namespace, environment, version) {
+		return
+	}
+	stored, err := s.store.GetVersion(c.Request.Context(), namespace, environment, version)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	items, err := s.store.Items(c.Request.Context(), namespace, environment, version)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"namespace":   namespace,
+		"environment": environment,
+		"version":     toVersionInfo(stored, effectiveVersion),
+		"items":       rawMap(items),
+	})
+}
+
 // handleVersionDiff powers the public diff entry. Scope comes from the query string; base and
 // target may come from query string or path parameters. Comparison always runs low -> high.
 func (s *server) handleVersionDiff(c *gin.Context) {

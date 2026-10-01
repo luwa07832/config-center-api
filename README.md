@@ -65,6 +65,24 @@ go run .
 
 按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
 
+### `GET /namespaces/:namespace/environments/:environment/config-versions/:version`
+
+读取任意历史版本保存的完整配置快照，纯只读，不新增版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。命中时 HTTP 200：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
+  "items": {"retries": "5", "timeout": "\"30\""}
+}
+```
+
+- `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`createdAt` 和 `effective`。
+- `items` 返回该快照当时保存的全部配置项；该版本没有配置项时 `items` 为空对象。
+- 值保持服务已保存的原始 JSON 语义：数字、布尔、`null` 和字符串不做类型转换，`1` 与 `1.0`、字符串 `"1"` 不合并。
+- 路径中的 `version` 必须是纯十进制正整数：`0`、负数、带符号数或其他非正整数写法返回 HTTP 400 `INVALID_VERSION`。
+
 ### `GET /config-version-diffs?namespace=...&environment=...&baseVersion=1&targetVersion=2`
 
 历史版本差异查询，纯只读，不产生任何落盘记录，也不改变版本历史、灰度状态或回滚记录。也支持路径形式：
@@ -109,3 +127,5 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 | 409 | `VERSION_ORDER_CONFLICT` | `targetVersion` 小于 `baseVersion` |
 | 404 | `VERSION_NOT_FOUND` | 任一版本在任何命名空间与环境中都不存在 |
 | 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但属于其他命名空间或环境 |
+
+历史快照读取（`GET .../config-versions/:version`）复用同一套版本查找顺序：版本号在任何命名空间与环境中都不存在时返回 404 `VERSION_NOT_FOUND`；版本号存在但属于其他命名空间或环境时返回 409 `VERSION_SCOPE_MISMATCH`；路径段不是纯十进制正整数时返回 400 `INVALID_VERSION`。
