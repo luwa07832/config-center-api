@@ -42,6 +42,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 	// Publishing and rollback entry points that feed the stored version history.
 	router.POST("/namespaces/:namespace/environments/:environment/config-versions", srv.handlePublish)
 	router.POST("/namespaces/:namespace/environments/:environment/config-versions/:version/rollback", srv.handleRollback)
+	router.POST("/namespaces/:namespace/environments/:environment/config-versions/:version/promote", srv.handlePromote)
 
 	router.NoRoute(func(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "route_not_found", "message": "no route matches this path"}})

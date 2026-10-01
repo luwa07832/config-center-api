@@ -93,6 +93,48 @@ func (s *server) handleRollback(c *gin.Context) {
 	})
 }
 
+func (s *server) handlePromote(c *gin.Context) {
+	namespace, environment := c.Param("namespace"), c.Param("environment")
+	sourceVersion, ok := parseVersionParam(c, c.Param("version"))
+	if !ok {
+		return
+	}
+	// Enforce the fixed lookup order: 400 INVALID_VERSION is handled above; the version must
+	// exist globally and belong to this scope before the gray-tag check applies.
+	if !s.versionAvailable(c, namespace, environment, sourceVersion) {
+		return
+	}
+	version, err := s.store.Promote(c.Request.Context(), namespace, environment, sourceVersion)
+	if errors.Is(err, store.ErrNotGray) {
+		writeError(c, http.StatusConflict, "NOT_GRAY_VERSION", "the source version is not a gray release")
+		return
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		writeError(c, http.StatusNotFound, "VERSION_NOT_FOUND", "the source version does not exist in this namespace and environment")
+		return
+	}
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	items, err := s.store.Items(c.Request.Context(), namespace, environment, version.Version)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"namespace":   namespace,
+		"environment": environment,
+		"version":     toVersionInfo(version, effectiveVersion),
+		"items":       rawMap(items),
+	})
+}
+
 func (s *server) handleEffective(c *gin.Context) {
 	namespace, environment := c.Query("namespace"), c.Query("environment")
 	if namespace == "" || environment == "" {

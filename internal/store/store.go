@@ -19,7 +19,7 @@ type Store struct {
 
 // Open prepares the database file and the schema this service needs.
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path)
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
@@ -34,6 +34,10 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if err := migrate(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return &Store{db: db}, nil
 }
@@ -51,6 +55,7 @@ type Version struct {
 	Version     int64          `json:"version"`
 	GrayTag     sql.NullString `json:"-"`
 	RollbackOf  sql.NullInt64  `json:"-"`
+	PromotionOf sql.NullInt64  `json:"-"`
 	CreatedAt   string         `json:"createdAt"`
 }
 
@@ -70,8 +75,19 @@ func (v Version) RollbackSource() int64 {
 	return 0
 }
 
+// PromotionSource returns the gray version promoted into this one, or 0 when it is not a promotion.
+func (v Version) PromotionSource() int64 {
+	if v.PromotionOf.Valid {
+		return v.PromotionOf.Int64
+	}
+	return 0
+}
+
 // ErrNotFound reports that no stored version matched the lookup.
 var ErrNotFound = errors.New("version not found")
+
+// ErrNotGray reports that the source version of a promotion carried no gray tag.
+var ErrNotGray = errors.New("version is not a gray release")
 
 // PublishInput describes one new release. Items map item name to its raw JSON value.
 type PublishInput struct {
@@ -180,17 +196,79 @@ func (s *Store) Rollback(ctx context.Context, namespace, environment string, sou
 	}, nil
 }
 
+// Promote copies a gray snapshot into a new full-release version inside one serialized write
+// transaction. The copy carries no gray tag, becomes effective immediately and records the source
+// version in promotion_of. The source version and every other historical version stay untouched.
+func (s *Store) Promote(ctx context.Context, namespace, environment string, sourceVersion int64) (Version, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return Version{}, fmt.Errorf("acquire conn: %w", err)
+	}
+	defer conn.Close()
+
+	var grayTag sql.NullString
+	row := conn.QueryRowContext(ctx,
+		"SELECT gray_tag FROM config_versions WHERE namespace = ? AND environment = ? AND version = ?",
+		namespace, environment, sourceVersion)
+	switch err := row.Scan(&grayTag); {
+	case errors.Is(err, sql.ErrNoRows):
+		return Version{}, ErrNotFound
+	case err != nil:
+		return Version{}, fmt.Errorf("load source: %w", err)
+	}
+	if !grayTag.Valid {
+		return Version{}, ErrNotGray
+	}
+
+	items, err := loadItems(ctx, conn, namespace, environment, sourceVersion)
+	if err != nil {
+		return Version{}, err
+	}
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return Version{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+
+	var next int64
+	row = conn.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) + 1 FROM config_versions WHERE namespace = ? AND environment = ?",
+		namespace, environment)
+	if err := row.Scan(&next); err != nil {
+		return Version{}, fmt.Errorf("next version: %w", err)
+	}
+	createdAt, err := storeItems(ctx, conn, namespace, environment, next, "", items)
+	if err != nil {
+		return Version{}, err
+	}
+	if _, err := conn.ExecContext(ctx,
+		"UPDATE config_versions SET promotion_of = ? WHERE namespace = ? AND environment = ? AND version = ?",
+		sourceVersion, namespace, environment, next); err != nil {
+		return Version{}, fmt.Errorf("record promotion: %w", err)
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return Version{}, fmt.Errorf("commit: %w", err)
+	}
+	return Version{
+		Namespace:   namespace,
+		Environment: environment,
+		Version:     next,
+		PromotionOf: sql.NullInt64{Int64: sourceVersion, Valid: true},
+		CreatedAt:   createdAt,
+	}, nil
+}
+
 // FindVersion loads one version regardless of namespace or environment.
 func (s *Store) FindVersion(ctx context.Context, version int64) (Version, error) {
 	return s.queryVersion(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE version = ?`, version)
 }
 
 // GetVersion loads one version in a specific namespace and environment.
 func (s *Store) GetVersion(ctx context.Context, namespace, environment string, version int64) (Version, error) {
 	return s.queryVersion(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE namespace = ? AND environment = ? AND version = ?`,
 		namespace, environment, version)
 }
@@ -210,7 +288,7 @@ func (s *Store) VersionExistsAnywhere(ctx context.Context, version int64) (bool,
 // ListVersions returns every version of a scope ordered by version ascending.
 func (s *Store) ListVersions(ctx context.Context, namespace, environment string) ([]Version, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE namespace = ? AND environment = ? ORDER BY version ASC`,
 		namespace, environment)
 	if err != nil {
@@ -254,7 +332,7 @@ type ItemVersionValue struct {
 // copies participate exactly like full releases.
 func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name string) ([]ItemVersionValue, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT v.namespace, v.environment, v.version, v.gray_tag, v.rollback_of, v.created_at, i.value_json
+		`SELECT v.namespace, v.environment, v.version, v.gray_tag, v.rollback_of, v.promotion_of, v.created_at, i.value_json
 		 FROM config_versions AS v
 		 LEFT JOIN config_items AS i
 		   ON i.namespace = v.namespace AND i.environment = v.environment
@@ -271,7 +349,7 @@ func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name st
 		var entry ItemVersionValue
 		var value sql.NullString
 		if err := rows.Scan(&entry.Version.Namespace, &entry.Version.Environment, &entry.Version.Version,
-			&entry.Version.GrayTag, &entry.Version.RollbackOf, &entry.Version.CreatedAt, &value); err != nil {
+			&entry.Version.GrayTag, &entry.Version.RollbackOf, &entry.Version.PromotionOf, &entry.Version.CreatedAt, &value); err != nil {
 			return nil, fmt.Errorf("scan item history: %w", err)
 		}
 		entry.HasValue = value.Valid
@@ -310,7 +388,7 @@ type rowScanner interface {
 
 func scanVersion(scanner rowScanner) (Version, error) {
 	var v Version
-	if err := scanner.Scan(&v.Namespace, &v.Environment, &v.Version, &v.GrayTag, &v.RollbackOf, &v.CreatedAt); err != nil {
+	if err := scanner.Scan(&v.Namespace, &v.Environment, &v.Version, &v.GrayTag, &v.RollbackOf, &v.PromotionOf, &v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("scan version: %w", err)
 	}
 	return v, nil
@@ -392,6 +470,24 @@ func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 	return json.RawMessage(encoded), nil
 }
 
+// migrate upgrades SQLite files created before promotion_of existed. Old files keep every row as
+// written; ALTER TABLE cannot attach a composite foreign key, so the added column stays untyped in
+// legacy databases while fresh databases create it with the key via the schema.
+func migrate(db *sql.DB) error {
+	var count int
+	if err := db.QueryRow(
+		"SELECT COUNT(1) FROM pragma_table_info('config_versions') WHERE name = 'promotion_of'",
+	).Scan(&count); err != nil {
+		return fmt.Errorf("check schema: %w", err)
+	}
+	if count == 0 {
+		if _, err := db.Exec("ALTER TABLE config_versions ADD COLUMN promotion_of INTEGER"); err != nil {
+			return fmt.Errorf("add promotion_of column: %w", err)
+		}
+	}
+	return nil
+}
+
 const schema = `
 CREATE TABLE IF NOT EXISTS service_metadata (
 	key   TEXT PRIMARY KEY,
@@ -403,10 +499,13 @@ CREATE TABLE IF NOT EXISTS config_versions (
 	environment TEXT NOT NULL,
 	version     INTEGER NOT NULL,
 	gray_tag    TEXT,
-	rollback_of INTEGER,
-	created_at  TEXT NOT NULL,
+	rollback_of  INTEGER,
+	promotion_of INTEGER,
+	created_at   TEXT NOT NULL,
 	PRIMARY KEY (namespace, environment, version),
 	FOREIGN KEY (namespace, environment, rollback_of)
+		REFERENCES config_versions(namespace, environment, version),
+	FOREIGN KEY (namespace, environment, promotion_of)
 		REFERENCES config_versions(namespace, environment, version)
 );
 

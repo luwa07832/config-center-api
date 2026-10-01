@@ -31,6 +31,7 @@ type VersionInfo struct {
 	Version     int64   `json:"version"`
 	GrayTag     *string `json:"grayTag"`
 	RollbackOf  *int64  `json:"rollbackOf"`
+	PromotionOf *int64  `json:"promotionOf"`
 	CreatedAt   string  `json:"createdAt"`
 	Effective   bool    `json:"effective"`
 }
@@ -128,6 +129,7 @@ func toVersionInfo(v store.Version, effectiveVersion int64) VersionInfo {
 		Environment: v.Environment,
 		Version:     v.Version,
 		RollbackOf:  intPtrOrNil(v.RollbackSource()),
+		PromotionOf: intPtrOrNil(v.PromotionSource()),
 		CreatedAt:   v.CreatedAt,
 		Effective:   effectiveVersion != 0 && v.Version == effectiveVersion,
 	}
