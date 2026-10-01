@@ -23,6 +23,10 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	// SQLite writes are serialized by BEGIN IMMEDIATE. A single connection makes that
+	// serialization explicit so concurrent publish/rollback/promote calls queue and block
+	// instead of racing for the write lock or observing SQLITE_BUSY.
+	db.SetMaxOpenConns(1)
 	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("enable wal: %w", err)
@@ -34,6 +38,10 @@ func Open(path string) (*Store, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+	if err := migrateSchema(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate schema: %w", err)
 	}
 	return &Store{db: db}, nil
 }
@@ -51,6 +59,7 @@ type Version struct {
 	Version     int64          `json:"version"`
 	GrayTag     sql.NullString `json:"-"`
 	RollbackOf  sql.NullInt64  `json:"-"`
+	PromotionOf sql.NullInt64  `json:"-"`
 	CreatedAt   string         `json:"createdAt"`
 }
 
@@ -70,8 +79,22 @@ func (v Version) RollbackSource() int64 {
 	return 0
 }
 
+// PromotionSource returns the gray version this one was promoted from, or 0 for releases and rollbacks.
+func (v Version) PromotionSource() int64 {
+	if v.PromotionOf.Valid {
+		return v.PromotionOf.Int64
+	}
+	return 0
+}
+
 // ErrNotFound reports that no stored version matched the lookup.
 var ErrNotFound = errors.New("version not found")
+
+// ErrScopeMismatch reports that a version exists in another namespace or environment.
+var ErrScopeMismatch = errors.New("version belongs to another scope")
+
+// ErrNotGray reports that promotion was requested for a version without a gray tag.
+var ErrNotGray = errors.New("version is not a gray release")
 
 // PublishInput describes one new release. Items map item name to its raw JSON value.
 type PublishInput struct {
@@ -101,7 +124,8 @@ func (s *Store) Publish(ctx context.Context, input PublishInput) (Version, error
 	if err := row.Scan(&next); err != nil {
 		return Version{}, fmt.Errorf("next version: %w", err)
 	}
-	createdAt, err := storeItems(ctx, conn, input.Namespace, input.Environment, next, input.GrayTag, input.Items)
+	createdAt, err := storeItems(ctx, conn, input.Namespace, input.Environment, next, input.GrayTag,
+		sql.NullInt64{}, sql.NullInt64{}, input.Items)
 	if err != nil {
 		return Version{}, err
 	}
@@ -158,14 +182,10 @@ func (s *Store) Rollback(ctx context.Context, namespace, environment string, sou
 	if grayTag.Valid {
 		tag = grayTag.String
 	}
-	createdAt, err := storeItems(ctx, conn, namespace, environment, next, tag, items)
+	createdAt, err := storeItems(ctx, conn, namespace, environment, next, tag,
+		sql.NullInt64{Int64: sourceVersion, Valid: true}, sql.NullInt64{}, items)
 	if err != nil {
 		return Version{}, err
-	}
-	if _, err := conn.ExecContext(ctx,
-		"UPDATE config_versions SET rollback_of = ? WHERE namespace = ? AND environment = ? AND version = ?",
-		sourceVersion, namespace, environment, next); err != nil {
-		return Version{}, fmt.Errorf("record rollback: %w", err)
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return Version{}, fmt.Errorf("commit: %w", err)
@@ -180,17 +200,83 @@ func (s *Store) Rollback(ctx context.Context, namespace, environment string, sou
 	}, nil
 }
 
+// Promote copies a gray release into a new full-release version and records the source gray
+// version in promotion_of. The new version carries no gray tag and becomes effective immediately.
+// It returns ErrNotFound when the version exists in no scope, ErrScopeMismatch when it belongs to
+// another namespace or environment, and ErrNotGray when the source version has no gray tag.
+func (s *Store) Promote(ctx context.Context, namespace, environment string, sourceVersion int64) (Version, error) {
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return Version{}, fmt.Errorf("acquire conn: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return Version{}, fmt.Errorf("begin tx: %w", err)
+	}
+	defer func() { _, _ = conn.ExecContext(context.Background(), "ROLLBACK") }()
+
+	var grayTag sql.NullString
+	err = conn.QueryRowContext(ctx,
+		"SELECT gray_tag FROM config_versions WHERE namespace = ? AND environment = ? AND version = ?",
+		namespace, environment, sourceVersion).Scan(&grayTag)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		var exists int
+		if lookupErr := conn.QueryRowContext(ctx,
+			"SELECT 1 FROM config_versions WHERE version = ? LIMIT 1", sourceVersion).Scan(&exists); lookupErr != nil {
+			if errors.Is(lookupErr, sql.ErrNoRows) {
+				return Version{}, ErrNotFound
+			}
+			return Version{}, fmt.Errorf("check version existence: %w", lookupErr)
+		}
+		return Version{}, ErrScopeMismatch
+	case err != nil:
+		return Version{}, fmt.Errorf("load source: %w", err)
+	}
+	if !grayTag.Valid {
+		return Version{}, ErrNotGray
+	}
+
+	items, err := loadItems(ctx, conn, namespace, environment, sourceVersion)
+	if err != nil {
+		return Version{}, err
+	}
+
+	var next int64
+	if err := conn.QueryRowContext(ctx,
+		"SELECT COALESCE(MAX(version), 0) + 1 FROM config_versions WHERE namespace = ? AND environment = ?",
+		namespace, environment).Scan(&next); err != nil {
+		return Version{}, fmt.Errorf("next version: %w", err)
+	}
+	createdAt, err := storeItems(ctx, conn, namespace, environment, next, "",
+		sql.NullInt64{}, sql.NullInt64{Int64: sourceVersion, Valid: true}, items)
+	if err != nil {
+		return Version{}, err
+	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return Version{}, fmt.Errorf("commit: %w", err)
+	}
+	return Version{
+		Namespace:   namespace,
+		Environment: environment,
+		Version:     next,
+		PromotionOf: sql.NullInt64{Int64: sourceVersion, Valid: true},
+		CreatedAt:   createdAt,
+	}, nil
+}
+
 // FindVersion loads one version regardless of namespace or environment.
 func (s *Store) FindVersion(ctx context.Context, version int64) (Version, error) {
 	return s.queryVersion(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE version = ?`, version)
 }
 
 // GetVersion loads one version in a specific namespace and environment.
 func (s *Store) GetVersion(ctx context.Context, namespace, environment string, version int64) (Version, error) {
 	return s.queryVersion(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE namespace = ? AND environment = ? AND version = ?`,
 		namespace, environment, version)
 }
@@ -210,7 +296,7 @@ func (s *Store) VersionExistsAnywhere(ctx context.Context, version int64) (bool,
 // ListVersions returns every version of a scope ordered by version ascending.
 func (s *Store) ListVersions(ctx context.Context, namespace, environment string) ([]Version, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT namespace, environment, version, gray_tag, rollback_of, created_at
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
 		 FROM config_versions WHERE namespace = ? AND environment = ? ORDER BY version ASC`,
 		namespace, environment)
 	if err != nil {
@@ -254,7 +340,7 @@ type ItemVersionValue struct {
 // copies participate exactly like full releases.
 func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name string) ([]ItemVersionValue, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT v.namespace, v.environment, v.version, v.gray_tag, v.rollback_of, v.created_at, i.value_json
+		`SELECT v.namespace, v.environment, v.version, v.gray_tag, v.rollback_of, v.promotion_of, v.created_at, i.value_json
 		 FROM config_versions AS v
 		 LEFT JOIN config_items AS i
 		   ON i.namespace = v.namespace AND i.environment = v.environment
@@ -271,7 +357,8 @@ func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name st
 		var entry ItemVersionValue
 		var value sql.NullString
 		if err := rows.Scan(&entry.Version.Namespace, &entry.Version.Environment, &entry.Version.Version,
-			&entry.Version.GrayTag, &entry.Version.RollbackOf, &entry.Version.CreatedAt, &value); err != nil {
+			&entry.Version.GrayTag, &entry.Version.RollbackOf, &entry.Version.PromotionOf,
+			&entry.Version.CreatedAt, &value); err != nil {
 			return nil, fmt.Errorf("scan item history: %w", err)
 		}
 		entry.HasValue = value.Valid
@@ -310,19 +397,21 @@ type rowScanner interface {
 
 func scanVersion(scanner rowScanner) (Version, error) {
 	var v Version
-	if err := scanner.Scan(&v.Namespace, &v.Environment, &v.Version, &v.GrayTag, &v.RollbackOf, &v.CreatedAt); err != nil {
+	if err := scanner.Scan(&v.Namespace, &v.Environment, &v.Version, &v.GrayTag,
+		&v.RollbackOf, &v.PromotionOf, &v.CreatedAt); err != nil {
 		return Version{}, fmt.Errorf("scan version: %w", err)
 	}
 	return v, nil
 }
 
-func storeItems(ctx context.Context, conn *sql.Conn, namespace, environment string, version int64, grayTag string,
-	items map[string]json.RawMessage) (string, error) {
+func storeItems(ctx context.Context, conn *sql.Conn, namespace, environment string, version int64,
+	grayTag string, rollbackOf, promotionOf sql.NullInt64, items map[string]json.RawMessage) (string, error) {
 	createdAt := nowUTC()
 	if _, err := conn.ExecContext(ctx,
-		`INSERT INTO config_versions (namespace, environment, version, gray_tag, rollback_of, created_at)
-		 VALUES (?, ?, ?, ?, NULL, ?)`,
-		namespace, environment, version, nullString(grayTag), createdAt); err != nil {
+		`INSERT INTO config_versions (namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		namespace, environment, version, nullString(grayTag),
+		nullableInt64(rollbackOf), nullableInt64(promotionOf), createdAt); err != nil {
 		return "", fmt.Errorf("insert version: %w", err)
 	}
 	names := make([]string, 0, len(items))
@@ -376,6 +465,14 @@ func nullString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: true}
 }
 
+// nullableInt64 converts a NullInt64 into a value/NULL bind argument.
+func nullableInt64(value sql.NullInt64) any {
+	if value.Valid {
+		return value.Int64
+	}
+	return nil
+}
+
 // canonicalJSON re-encodes raw JSON so whitespace and object key order never cause false diffs,
 // while number, boolean, null and string semantics are preserved.
 func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
@@ -404,9 +501,13 @@ CREATE TABLE IF NOT EXISTS config_versions (
 	version     INTEGER NOT NULL,
 	gray_tag    TEXT,
 	rollback_of INTEGER,
+	promotion_of INTEGER,
 	created_at  TEXT NOT NULL,
 	PRIMARY KEY (namespace, environment, version),
 	FOREIGN KEY (namespace, environment, rollback_of)
+		REFERENCES config_versions(namespace, environment, version)
+	,
+	FOREIGN KEY (namespace, environment, promotion_of)
 		REFERENCES config_versions(namespace, environment, version)
 );
 
@@ -423,3 +524,37 @@ CREATE TABLE IF NOT EXISTS config_items (
 
 CREATE INDEX IF NOT EXISTS idx_config_versions_global ON config_versions(version);
 `
+
+// migrateSchema upgrades databases created before promotion_of existed. The column is nullable,
+// so every historical version reads promotionOf as null without rewriting existing rows.
+func migrateSchema(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(config_versions)")
+	if err != nil {
+		return fmt.Errorf("inspect schema: %w", err)
+	}
+	hasPromotion := false
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan schema: %w", err)
+		}
+		if name == "promotion_of" {
+			hasPromotion = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("read schema: %w", err)
+	}
+	rows.Close()
+	if !hasPromotion {
+		if _, err := db.Exec("ALTER TABLE config_versions ADD COLUMN promotion_of INTEGER"); err != nil {
+			return fmt.Errorf("add promotion_of: %w", err)
+		}
+	}
+	return nil
+}

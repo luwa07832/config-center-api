@@ -57,13 +57,37 @@ go run .
 
 把指定历史版本的快照复制为一个新版本，并在新版本上记录 `rollbackOf` 来源版本号。源版本的灰度标签一并复制。源版本在当前作用域不存在时返回 HTTP 404 `VERSION_NOT_FOUND`。
 
+### `POST /namespaces/:namespace/environments/:environment/config-versions/:version/promote`
+
+把路径版本的灰度快照晋升为正式生效版本，无需业务请求体。服务读取源版本的完整快照，在同一命名空间与环境生成下一个版本：新版本复制全部配置项与原样 JSON 值、不带 `grayTag`、立即生效，并在 `promotionOf` 上记录源版本号（`rollbackOf` 为 `null`）。源版本与其余历史保持不变。返回 HTTP 201：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "version": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": null, "promotionOf": 2, "createdAt": "2026-10-01T10:15:00Z", "effective": true},
+  "items": {"retries": "5", "timeout": "\"30\""}
+}
+```
+
+- 新版本号是该作用域当前最大版本号加一；每次晋升只创建一个版本，与发布、回滚并发写入时也不产生重复或跳号。
+- 普通发布、回滚以及全部旧版本的 `promotionOf` 均为 `null`；所有版本相关读取结果（版本历史、历史快照、版本差异、单项历史）都展示 `promotionOf`。
+- 失败时不留下半成品版本，也不改变历史、灰度、回滚或生效状态。固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `INVALID_VERSION` | 路径 `version` 不是纯十进制正整数 |
+| 404 | `VERSION_NOT_FOUND` | 该版本号在任何命名空间与环境中都不存在 |
+| 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但属于其他命名空间或环境 |
+| 409 | `NOT_GRAY_VERSION` | 源版本存在，但没有 `grayTag` |
+
 ### `GET /effective-configs?namespace=...&environment=...`
 
 返回当前生效（最新全量发布）的版本号、灰度标签与配置项。尚无全量发布时 `effectiveVersion` 与 `grayTag` 为 `null`、`items` 为空对象。命名空间或环境缺失时返回 HTTP 400 `MISSING_SCOPE`。
 
 ### `GET /config-versions?namespace=...&environment=...`
 
-按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
+按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、晋升来源 `promotionOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
 
 ### `GET /namespaces/:namespace/environments/:environment/config-versions/:version`
 
@@ -73,12 +97,12 @@ go run .
 {
   "namespace": "payments",
   "environment": "prod",
-  "version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
+  "version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
   "items": {"retries": "5", "timeout": "\"30\""}
 }
 ```
 
-- `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`createdAt` 和 `effective`。
+- `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt` 和 `effective`。
 - `items` 返回该快照当时保存的全部配置项；该版本没有配置项时 `items` 为空对象。
 - 值保持服务已保存的原始 JSON 语义：数字、布尔、`null` 和字符串不做类型转换，`1` 与 `1.0`、字符串 `"1"` 不合并。
 - 路径中的 `version` 必须是纯十进制正整数：`0`、负数、带符号数或其他非正整数写法返回 HTTP 400 `INVALID_VERSION`。
@@ -97,8 +121,8 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 {
   "namespace": "payments",
   "environment": "prod",
-  "baseVersion": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false},
-  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
+  "baseVersion": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false},
+  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
   "effectiveVersion": 1,
   "changedCount": 2,
   "changes": [
@@ -128,9 +152,9 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
   "effectiveVersion": 3,
   "effectiveItem": {"present": true, "value": "\"30\""},
   "changes": [
-    {"version": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false}, "changeType": "added", "newValue": "\"30\""},
-    {"version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false}, "changeType": "removed", "oldValue": "\"30\""},
-    {"version": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": 1, "createdAt": "2026-10-01T10:10:00Z", "effective": true}, "changeType": "added", "newValue": "\"30\""}
+    {"version": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false}, "changeType": "added", "newValue": "\"30\""},
+    {"version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false}, "changeType": "removed", "oldValue": "\"30\""},
+    {"version": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": 1, "promotionOf": null, "createdAt": "2026-10-01T10:10:00Z", "effective": true}, "changeType": "added", "newValue": "\"30\""}
   ],
   "totalChanges": 3
 }
@@ -141,7 +165,7 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 - 每个版本都与同作用域内紧邻的前一个已存版本比较该配置项，`changes` 按版本号升序；灰度发布与回滚版本同样参与比较。
 - 首次出现记 `added`，随后消失记 `removed`，再次出现仍记 `added`，值变化记 `modified`，无变化的版本不列入。
 - `added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；值保持已保存的原始 JSON，比较沿用原样 JSON 语义（数字、布尔、`null`、字符串不转换），仅做对象键排序和空白规范化。
-- 每个 `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`createdAt` 和 `effective`。
+- 每个 `version` 对象沿用历史版本元数据语义，包含版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt` 和 `effective`。
 - `effectiveVersion` 是最新全量发布版本号，没有全量发布时为 `null`。
 - `effectiveItem` 描述该配置项在当前生效快照中的状态：存在时为 `{"present": true, "value": <原样 JSON 值>}`，值为 JSON `null` 时 `value` 仍是 `null`；不存在时为 `{"present": false}` 且不返回 `value`。
 - 名称在该作用域从未出现、或只在历史版本中出现但当前不在生效快照中，都返回 HTTP 200：前者 `changes` 为空数组、`totalChanges` 为 0、`effectiveItem.present` 为 `false`，后者正常列出变化。

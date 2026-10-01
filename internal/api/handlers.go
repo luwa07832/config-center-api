@@ -93,6 +93,43 @@ func (s *server) handleRollback(c *gin.Context) {
 	})
 }
 
+func (s *server) handlePromote(c *gin.Context) {
+	namespace, environment := c.Param("namespace"), c.Param("environment")
+	sourceVersion, ok := parseVersionParam(c, c.Param("version"))
+	if !ok {
+		return
+	}
+	version, err := s.store.Promote(c.Request.Context(), namespace, environment, sourceVersion)
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		writeError(c, http.StatusNotFound, "VERSION_NOT_FOUND", "version does not exist in any namespace and environment")
+		return
+	case errors.Is(err, store.ErrScopeMismatch):
+		writeError(c, http.StatusConflict, "VERSION_SCOPE_MISMATCH", "version belongs to another namespace or environment")
+		return
+	case errors.Is(err, store.ErrNotGray):
+		writeError(c, http.StatusConflict, "NOT_GRAY_VERSION", "the source version is not a gray release")
+		return
+	case err != nil:
+		s.handleStorageError(c, err)
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	items, err := s.store.Items(c.Request.Context(), namespace, environment, version.Version)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{
+		"version": toVersionInfo(version, effectiveVersion),
+		"items":   rawMap(items),
+	})
+}
+
 func (s *server) handleEffective(c *gin.Context) {
 	namespace, environment := c.Query("namespace"), c.Query("environment")
 	if namespace == "" || environment == "" {
