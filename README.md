@@ -65,6 +65,23 @@ go run .
 
 按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
 
+### `GET /namespaces/:namespace/environments/:environment/config-versions/:version`
+
+读取一个历史版本当时保存的完整配置快照，用于复核一次历史发布的内容。纯只读：不产生新版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "version": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": true},
+  "items": {"timeout": "\"30\"", "retries": "3", "feature": "true"}
+}
+```
+
+- `version` 沿用历史版本列表中的元数据语义（版本号、`grayTag`、`rollbackOf`、`createdAt`、`effective`）。
+- `items` 是该快照保存的全部配置项；值保持原始 JSON 语义，数字、布尔、`null` 和字符串不做类型转换，`1` 与 `1.0`、`"1"` 与 `1` 不合并。没有配置项时 `items` 为空对象。
+- `version` 路径段必须是正整数：`0`、负数、带符号数或非纯十进制正整数返回 HTTP 400 `INVALID_VERSION`；版本号在任何命名空间与环境中都不存在时返回 HTTP 404 `VERSION_NOT_FOUND`；版本号存在但属于其他命名空间或环境时返回 HTTP 409 `VERSION_SCOPE_MISMATCH`。
+
 ### `GET /config-version-diffs?namespace=...&environment=...&baseVersion=1&targetVersion=2`
 
 历史版本差异查询，纯只读，不产生任何落盘记录，也不改变版本历史、灰度状态或回滚记录。也支持路径形式：
