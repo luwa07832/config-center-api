@@ -1,6 +1,6 @@
 # config-center-api
 
-把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置并查看历史版本。
+把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本，并比较两个历史版本的配置项差异。
 
 ## 运行要求
 
@@ -38,6 +38,74 @@ go run .
 {"error":{"code":"storage_unavailable","message":"database is not available"}}
 ```
 
+### `POST /namespaces/:namespace/environments/:environment/config-versions`
+
+发布一个新的配置快照。请求体：
+
+```json
+{
+  "grayTag": "canary",
+  "items": {"timeout": "\"30\"", "retries": "3", "feature": "true"}
+}
+```
+
+- `items` 的每个值都是一段原始 JSON：数字、布尔值、`null` 和字符串按原语义保存，不做类型转换。
+- 省略或传空 `grayTag` 表示全量发布，立即成为该命名空间与环境的生效版本；带 `grayTag` 的灰度发布不会改变当前生效版本。
+- 版本号在同一命名空间与环境内从 1 开始单调递增。返回 HTTP 201 与新版本元数据。
+
+### `POST /namespaces/:namespace/environments/:environment/config-versions/:version/rollback`
+
+把指定历史版本的快照复制为一个新版本，并在新版本上记录 `rollbackOf` 来源版本号。源版本的灰度标签一并复制。源版本在当前作用域不存在时返回 HTTP 404 `VERSION_NOT_FOUND`。
+
+### `GET /effective-configs?namespace=...&environment=...`
+
+返回当前生效（最新全量发布）的版本号、灰度标签与配置项。尚无全量发布时 `effectiveVersion` 与 `grayTag` 为 `null`、`items` 为空对象。命名空间或环境缺失时返回 HTTP 400 `MISSING_SCOPE`。
+
+### `GET /config-versions?namespace=...&environment=...`
+
+按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
+
+### `GET /config-version-diffs?namespace=...&environment=...&baseVersion=1&targetVersion=2`
+
+历史版本差异查询，纯只读，不产生任何落盘记录，也不改变版本历史、灰度状态或回滚记录。也支持路径形式：
+
+```text
+GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/:target
+```
+
+比较始终按版本号从小到大执行（`baseVersion <= targetVersion`）。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "baseVersion": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false},
+  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": "canary", "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
+  "effectiveVersion": 1,
+  "changedCount": 2,
+  "changes": [
+    {"name": "retries", "changeType": "modified", "oldValue": "3", "newValue": "5", "affectsEffectiveConfig": true},
+    {"name": "timeout", "changeType": "added", "newValue": "\"30\"", "affectsEffectiveConfig": false}
+  ]
+}
+```
+
+差异语义：
+
+- 按配置项名称归并，输出顺序按名称字典序稳定排列。
+- `changeType` 固定为 `added`、`removed`、`modified`：`added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者。
+- 值保留原始 JSON 语义（数字、布尔、`null`、字符串不转换）；仅做对象键排序和空白规范化，因此 `1` 与 `1.0`、`"1"` 与 `1` 仍视为不同。
+- `affectsEffectiveConfig` 表示该差异当前是否体现在生效配置上：灰度目标版本与生效版本不一致的差异为 `false`。
+- 两个版本相同或差异集合为空时返回 HTTP 200 且 `changedCount` 为 0、`changes` 为空数组。
+
 ## 错误约定
 
-所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。
+所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。版本差异查询的固定错误结果如下，不会被替换为空差异或静默忽略：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 为空 |
+| 400 | `INVALID_VERSION` | `baseVersion` 或 `targetVersion` 不是正整数 |
+| 409 | `VERSION_ORDER_CONFLICT` | `targetVersion` 小于 `baseVersion` |
+| 404 | `VERSION_NOT_FOUND` | 任一版本在任何命名空间与环境中都不存在 |
+| 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但属于其他命名空间或环境 |
