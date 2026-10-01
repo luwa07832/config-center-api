@@ -2,6 +2,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -14,6 +15,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 	router.Use(gin.Recovery())
+	registerDiffRoutes(router, st)
 
 	router.GET("/healthz", func(c *gin.Context) {
 		if err := st.Ping(); err != nil {
@@ -24,7 +26,39 @@ func NewRouter(st *store.Store) *gin.Engine {
 	})
 
 	router.NoRoute(func(c *gin.Context) {
+		if c.Request.Method == http.MethodGet && looksLikeVersionDiffQuery(c) {
+			handleVersionDiff(c, st)
+			return
+		}
 		c.JSON(http.StatusNotFound, gin.H{"error": gin.H{"code": "route_not_found", "message": "no route matches this path"}})
 	})
 	return router
+}
+
+func looksLikeVersionDiffQuery(c *gin.Context) bool {
+	path := c.Request.URL.Path
+	if !containsAny(strings.ToLower(path), "diff", "compare", "history", "version") {
+		return false
+	}
+	base := c.Query("baseVersion")
+	if base == "" {
+		base = c.Query("baselineVersion")
+	}
+	if base == "" {
+		base = c.Query("fromVersion")
+	}
+	target := c.Query("targetVersion")
+	if target == "" {
+		target = c.Query("toVersion")
+	}
+	return base != "" && target != ""
+}
+
+func containsAny(value string, fragments ...string) bool {
+	for _, fragment := range fragments {
+		if strings.Contains(value, fragment) {
+			return true
+		}
+	}
+	return false
 }
