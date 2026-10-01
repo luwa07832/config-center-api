@@ -240,6 +240,36 @@ func (s *Store) Items(ctx context.Context, namespace, environment string, versio
 	return items, nil
 }
 
+// ItemValue is the stored value of one configuration item in one version.
+type ItemValue struct {
+	Version int64
+	Value   json.RawMessage
+}
+
+// ItemValues returns the stored value of one item in every version of a scope that carries it,
+// ordered by version ascending. Versions without the item are skipped.
+func (s *Store) ItemValues(ctx context.Context, namespace, environment, name string) ([]ItemValue, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT version, value_json FROM config_items
+		 WHERE namespace = ? AND environment = ? AND name = ? ORDER BY version ASC`,
+		namespace, environment, name)
+	if err != nil {
+		return nil, fmt.Errorf("load item values: %w", err)
+	}
+	defer rows.Close()
+	values := []ItemValue{}
+	for rows.Next() {
+		var item ItemValue
+		var value string
+		if err := rows.Scan(&item.Version, &value); err != nil {
+			return nil, fmt.Errorf("scan item value: %w", err)
+		}
+		item.Value = json.RawMessage(value)
+		values = append(values, item)
+	}
+	return values, rows.Err()
+}
+
 // EffectiveVersion returns the latest full-release version of a scope. Gray releases never
 // become effective. 0 means no effective snapshot exists.
 func (s *Store) EffectiveVersion(ctx context.Context, namespace, environment string) (int64, error) {

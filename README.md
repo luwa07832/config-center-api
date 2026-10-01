@@ -65,6 +65,34 @@ go run .
 
 按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
 
+### `GET /config-item-histories?namespace=...&environment=...&name=...`
+
+返回单个配置项在各版本间的变化历史，纯只读，不产生任何落盘记录，也不改变版本历史、灰度状态或回滚记录。`name` 按原样匹配，不裁剪空白。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "name": "timeout",
+  "effectiveVersion": 4,
+  "effectiveItem": {"present": true, "value": "\"60\""},
+  "changes": [
+    {"version": {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false}, "changeType": "added", "newValue": "\"30\""},
+    {"version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": null, "rollbackOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false}, "changeType": "modified", "oldValue": "\"30\"", "newValue": "\"60\""}
+  ],
+  "totalChanges": 2
+}
+```
+
+历史语义：
+
+- `effectiveVersion` 是最新全量发布版本，尚无全量发布时为 `null`。
+- `effectiveItem` 描述该项在当前生效版本中的状态：存在时 `present` 为 `true` 并携带原样 JSON `value`（`null` 值照常返回）；不存在时 `present` 为 `false` 且不返回 `value`。
+- `changes` 按版本号升序；每个版本与紧邻前一版本比较该项的状态，灰度与回滚版本同样参与。首次出现为 `added`、删除为 `removed`、再次出现为 `added`、值变化为 `modified`，无变化的版本不列入。
+- `added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；`totalChanges` 等于 `changes` 数量。
+- 值保留原始 JSON 语义（数字、布尔、`null`、字符串不转换），仅做对象键排序和空白规范化，因此 `1` 与 `1.0`、`"1"` 与 `1` 仍视为不同。
+- 名称从未出现时 `effectiveItem.present` 为 `false`、`changes` 为空数组、`totalChanges` 为 0，`effectiveVersion` 仍按当前状态给出；名称只在历史版本出现时正常返回其变化。
+
 ### `GET /namespaces/:namespace/environments/:environment/config-versions/:version`
 
 读取任意历史版本保存的完整配置快照，纯只读，不新增版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。命中时 HTTP 200：
@@ -123,6 +151,7 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 | HTTP | code | 触发条件 |
 |---|---|---|
 | 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 为空 |
+| 400 | `MISSING_ITEM_NAME` | 单项历史查询的 `name` 缺失或为空 |
 | 400 | `INVALID_VERSION` | `baseVersion` 或 `targetVersion` 不是正整数 |
 | 409 | `VERSION_ORDER_CONFLICT` | `targetVersion` 小于 `baseVersion` |
 | 404 | `VERSION_NOT_FOUND` | 任一版本在任何命名空间与环境中都不存在 |
