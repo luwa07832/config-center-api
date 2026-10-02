@@ -33,6 +33,9 @@ func NewRouter(st *store.Store) *gin.Engine {
 	router.GET("/config-version-diffs", srv.handleVersionDiff)
 	router.GET("/namespaces/:namespace/environments/:environment/config-version-diffs/:base/:target", srv.handleVersionDiff)
 
+	// Scope listing is the read-only index of namespaces and environments that own versions.
+	router.GET("/config-scopes", srv.handleConfigScopes)
+
 	// Cross-environment effective config diff is also read-only.
 	router.GET("/effective-config-diffs", srv.handleEffectiveConfigDiff)
 	router.GET("/namespaces/:namespace/effective-config-diffs/:baseEnvironment/:targetEnvironment", srv.handleEffectiveConfigDiff)
