@@ -370,6 +370,73 @@ func (s *server) handleEffectiveConfigDiff(c *gin.Context) {
 		baseVersion, targetVersion, baseItems, targetItems))
 }
 
+// handleCrossEnvironmentVersionDiff compares two historical versions that live in different
+// environments of one namespace. It is strictly read-only: no version, audit or diff record is
+// created, and no publish, gray, promotion, rollback, history or effective state changes.
+func (s *server) handleCrossEnvironmentVersionDiff(c *gin.Context) {
+	namespace := c.Query("namespace")
+	baseEnvironment := c.Query("baseEnvironment")
+	targetEnvironment := c.Query("targetEnvironment")
+	if namespace == "" || baseEnvironment == "" || targetEnvironment == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace, baseEnvironment and targetEnvironment are required")
+		return
+	}
+	if baseEnvironment == targetEnvironment {
+		writeError(c, http.StatusBadRequest, "SAME_ENVIRONMENT", "baseEnvironment and targetEnvironment must be different")
+		return
+	}
+	base, ok := parseVersionParam(c, c.Query("baseVersion"))
+	if !ok {
+		return
+	}
+	target, ok := parseVersionParam(c, c.Query("targetVersion"))
+	if !ok {
+		return
+	}
+	// Lookup order is fixed base first, then target: each version must exist globally and belong
+	// to its own side's scope before the other side is inspected.
+	if !s.versionAvailable(c, namespace, baseEnvironment, base) {
+		return
+	}
+	if !s.versionAvailable(c, namespace, targetEnvironment, target) {
+		return
+	}
+
+	baseVersion, err := s.store.GetVersion(c.Request.Context(), namespace, baseEnvironment, base)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	targetVersion, err := s.store.GetVersion(c.Request.Context(), namespace, targetEnvironment, target)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	baseItems, err := s.store.Items(c.Request.Context(), namespace, baseEnvironment, base)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	targetItems, err := s.store.Items(c.Request.Context(), namespace, targetEnvironment, target)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	baseEffective, err := s.store.EffectiveVersion(c.Request.Context(), namespace, baseEnvironment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	targetEffective, err := s.store.EffectiveVersion(c.Request.Context(), namespace, targetEnvironment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, BuildCrossEnvironmentVersionDiff(namespace,
+		toVersionInfo(baseVersion, baseEffective), toVersionInfo(targetVersion, targetEffective),
+		baseItems, targetItems))
+}
+
 // effectiveSnapshot loads the effective version metadata and items of one scope. A scope without
 // a full release yields a nil version and an empty item map.
 func (s *server) effectiveSnapshot(c *gin.Context, namespace, environment string) (*VersionInfo, map[string]json.RawMessage, error) {

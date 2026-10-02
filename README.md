@@ -1,6 +1,6 @@
 # config-center-api
 
-把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，并对比同一命名空间下两个环境的当前生效配置。
+把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，对比同一命名空间下两个环境的当前生效配置，并比较同一命名空间下两个环境各自历史版本的差异。
 
 ## 运行要求
 
@@ -177,6 +177,41 @@ HTTP 200 响应：
 |---|---|---|
 | 400 | `MISSING_SCOPE` | `namespace`、`baseEnvironment` 或 `targetEnvironment` 为空 |
 | 400 | `SAME_ENVIRONMENT` | `baseEnvironment` 与 `targetEnvironment` 相同 |
+
+### `GET /cross-environment-config-version-diffs?namespace=...&baseEnvironment=...&baseVersion=...&targetEnvironment=...&targetVersion=...`
+
+跨环境历史版本对比，查询同一命名空间下两个不同环境各自的一个历史版本之间的配置项差异。版本号按环境独立递增，`baseVersion` 大于、等于或小于 `targetVersion` 都可以比较。纯只读，不创建版本、审计或差异记录，也不改变发布、灰度、晋升、回滚、历史读取与现有差异查询结果。结果表示从 base 侧到 target 侧的变化。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "baseEnvironment": "staging",
+  "targetEnvironment": "prod",
+  "baseVersion": {"namespace": "payments", "environment": "staging", "version": 1, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": true},
+  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": null, "promotionOf": 2, "createdAt": "2026-10-01T10:10:00Z", "effective": true},
+  "changedCount": 2,
+  "changes": [
+    {"name": "retries", "changeType": "modified", "oldValue": "3", "newValue": "5"},
+    {"name": "timeout", "changeType": "added", "newValue": "\"30\""}
+  ]
+}
+```
+
+差异语义：
+
+- `baseVersion` 与 `targetVersion` 是对应侧历史版本的元数据对象（版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt`、`effective`），`effective` 表示该版本是否为其所在环境的当前生效版本；旧数据中 `promotionOf` 缺省仍为 `null`。
+- `changes` 按配置项名称字典序排列，`changeType` 固定为 `added`、`removed`、`modified`：`added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；变化不携带 `affectsEffectiveConfig` 字段，`changedCount` 等于 `changes` 条数。
+- 值保留已保存的原始 JSON：数字、布尔、`null`、字符串不转换，仅忽略空白与对象键顺序的表示差异，因此 `1` 与 `1.0`、`1` 与 `"1"` 仍视为不同。
+- 两侧版本快照完全相同时返回 HTTP 200 且 `changedCount` 为 0、`changes` 为空数组。
+- 参数按 `namespace`/环境、`baseVersion`、`targetVersion`、再到 base 侧版本、target 侧版本的固定顺序校验，固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace`、`baseEnvironment` 或 `targetEnvironment` 为空 |
+| 400 | `SAME_ENVIRONMENT` | `baseEnvironment` 与 `targetEnvironment` 相同 |
+| 400 | `INVALID_VERSION` | `baseVersion` 或 `targetVersion` 不是纯十进制正整数（先校验 base 再校验 target） |
+| 404 | `VERSION_NOT_FOUND` | 版本号在任何命名空间与环境中都不存在（先查 base 侧再查 target 侧） |
+| 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但不属于该侧的命名空间与环境 |
 
 ### `GET /config-item-histories?namespace=...&environment=...&name=...`
 
