@@ -45,6 +45,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 	router.GET("/effective-configs", srv.handleEffective)
 	router.GET("/config-scopes", srv.handleConfigScopes)
 	router.GET("/config-versions", srv.handleHistory)
+	router.GET("/config-version-records", srv.handleVersionRecords)
 	router.GET("/config-item-histories", srv.handleItemHistory)
 	router.GET("/effective-config-item-search", srv.handleEffectiveConfigItemSearch)
 	router.GET("/namespaces/:namespace/environments/:environment/config-versions/:version", srv.handleVersionSnapshot)
