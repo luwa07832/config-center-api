@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -419,6 +420,24 @@ LEFT JOIN config_items AS i
 		results = append(results, entry)
 	}
 	return results, rows.Err()
+}
+
+// HistoricalEffectiveVersion returns the newest full-release snapshot of a scope that was
+// effective at the given point in time. Only versions with a created_at no later than asOf
+// participate and gray releases (gray_tag IS NULL is required) never qualify. When several full
+// releases share the creation second, the highest version number wins. It is one read-only query
+// and creates no row. ErrNotFound means the scope had no full release at that point in time.
+func (s *Store) HistoricalEffectiveVersion(ctx context.Context, namespace, environment string, asOf time.Time) (Version, error) {
+	// Stored timestamps are UTC RFC3339 values truncated to the second; comparing the cutoff as
+	// the same fixed-width string keeps versions created within the asOf second eligible.
+	cutoff := asOf.UTC().Truncate(time.Second).Format(time.RFC3339)
+	return s.queryVersion(ctx,
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
+		 FROM config_versions
+		 WHERE namespace = ? AND environment = ? AND gray_tag IS NULL AND created_at <= ?
+		 ORDER BY created_at DESC, version DESC
+		 LIMIT 1`,
+		namespace, environment, cutoff)
 }
 
 // EffectiveVersion returns the latest full-release version of a scope. Gray releases never

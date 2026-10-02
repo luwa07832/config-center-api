@@ -41,6 +41,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 	router.GET("/cross-environment-config-version-diffs", srv.handleCrossEnvironmentVersionDiff)
 
 	// Effective configuration and version history for a namespace and environment.
+	router.GET("/historical-effective-configs", srv.handleHistoricalEffective)
 	router.GET("/effective-configs", srv.handleEffective)
 	router.GET("/config-versions", srv.handleHistory)
 	router.GET("/config-item-histories", srv.handleItemHistory)
