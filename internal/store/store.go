@@ -307,6 +307,50 @@ func (s *Store) ListVersions(ctx context.Context, namespace, environment string)
 	return versions, rows.Err()
 }
 
+// VersionPage carries one keyset page of the version history plus the scope-wide total count.
+type VersionPage struct {
+	Versions []Version
+	Total    int64
+	HasMore  bool
+}
+
+// ListVersionsPage returns up to limit versions of a scope with version numbers greater than
+// afterVersion, ordered by version ascending, along with the total version count of the scope.
+// The read is a pure query: it creates no version and changes no stored record.
+func (s *Store) ListVersionsPage(ctx context.Context, namespace, environment string, afterVersion int64, limit int) (VersionPage, error) {
+	page := VersionPage{Versions: []Version{}}
+	row := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM config_versions WHERE namespace = ? AND environment = ?",
+		namespace, environment)
+	if err := row.Scan(&page.Total); err != nil {
+		return VersionPage{}, fmt.Errorf("count versions: %w", err)
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
+		 FROM config_versions WHERE namespace = ? AND environment = ? AND version > ?
+		 ORDER BY version ASC LIMIT ?`,
+		namespace, environment, afterVersion, limit+1)
+	if err != nil {
+		return VersionPage{}, fmt.Errorf("list versions page: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		v, err := scanVersion(rows)
+		if err != nil {
+			return VersionPage{}, err
+		}
+		page.Versions = append(page.Versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return VersionPage{}, err
+	}
+	if len(page.Versions) > limit {
+		page.HasMore = true
+		page.Versions = page.Versions[:limit]
+	}
+	return page, nil
+}
+
 // Items loads the configuration items carried by a version keyed by item name.
 func (s *Store) Items(ctx context.Context, namespace, environment string, version int64) (map[string]json.RawMessage, error) {
 	items, err := loadItems(ctx, s.db, namespace, environment, version)

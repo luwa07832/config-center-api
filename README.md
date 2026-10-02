@@ -106,6 +106,41 @@ go run .
 
 按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、晋升来源 `promotionOf`、创建时间以及该版本是否为当前生效版本（`effective`）。
 
+可选查询参数 `limit` 与 `afterVersion` 用于分页读取；两个参数都不传时保持上述完整列表响应，任一传入即启用分页。分页读取是纯只读操作：不创建版本，也不改变任何已存记录。
+
+- `limit` 是 1 到 100 的十进制正整数，缺省为 100。
+- `afterVersion` 是纯十进制非负整数，表示只读取该版本号之后的版本；第一页不传，后续页传上一页响应中的 `nextAfterVersion`。
+- 顺序始终按版本号升序，`versions` 只包含连续一页；相同参数重复读取得到相同页面，发布新版本不影响已定位的旧页面。
+
+分页响应示例：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "versions": [
+    {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": null, "promotionOf": 2, "createdAt": "2026-10-01T10:10:00Z", "effective": true}
+  ],
+  "totalVersions": 5,
+  "nextAfterVersion": 3,
+  "hasMore": true
+}
+```
+
+- `totalVersions` 是该作用域的全部版本数。
+- `nextAfterVersion` 是本页最后一条的版本号；本页为空时等于请求中的 `afterVersion`；作用域完全无版本时为 0。
+- `hasMore` 表示本页之后是否还有版本。
+- `afterVersion` 大于已有最大版本号时返回 HTTP 200，`versions` 为空数组。
+
+分页读取的固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 缺失或为空 |
+| 400 | `INVALID_PAGE_SIZE` | `limit` 存在但不是 1 到 100 的十进制正整数 |
+| 400 | `INVALID_CURSOR_VERSION` | `afterVersion` 存在但不是纯十进制非负整数 |
+| 503 | `storage_unavailable` | 存储不可用 |
+
 ### `GET /namespaces/:namespace/environments/:environment/config-versions/:version`
 
 读取任意历史版本保存的完整配置快照，纯只读，不新增版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。命中时 HTTP 200：

@@ -180,6 +180,12 @@ func (s *server) handleHistory(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace and environment are required")
 		return
 	}
+	rawLimit, hasLimit := c.GetQuery("limit")
+	rawAfter, hasAfter := c.GetQuery("afterVersion")
+	if hasLimit || hasAfter {
+		s.handleHistoryPage(c, namespace, environment, rawLimit, hasLimit, rawAfter, hasAfter)
+		return
+	}
 	versions, err := s.store.ListVersions(c.Request.Context(), namespace, environment)
 	if err != nil {
 		s.handleStorageError(c, err)
@@ -199,6 +205,87 @@ func (s *server) handleHistory(c *gin.Context) {
 		"environment": environment,
 		"versions":    infos,
 	})
+}
+
+// handleHistoryPage serves one keyset page of the version history. It is strictly read-only:
+// no version is created and no stored record changes.
+func (s *server) handleHistoryPage(c *gin.Context, namespace, environment, rawLimit string, hasLimit bool, rawAfter string, hasAfter bool) {
+	limit := defaultHistoryPageSize
+	if hasLimit {
+		parsed, ok := parseHistoryPageSize(rawLimit)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "INVALID_PAGE_SIZE", "limit must be a decimal integer between 1 and 100")
+			return
+		}
+		limit = parsed
+	}
+	var afterVersion int64
+	if hasAfter {
+		parsed, ok := parseHistoryCursor(rawAfter)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "INVALID_CURSOR_VERSION", "afterVersion must be a non-negative decimal integer")
+			return
+		}
+		afterVersion = parsed
+	}
+	page, err := s.store.ListVersionsPage(c.Request.Context(), namespace, environment, afterVersion, limit)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	infos := make([]VersionInfo, 0, len(page.Versions))
+	for _, version := range page.Versions {
+		infos = append(infos, toVersionInfo(version, effectiveVersion))
+	}
+	nextAfterVersion := afterVersion
+	switch {
+	case page.Total == 0:
+		nextAfterVersion = 0
+	case len(page.Versions) > 0:
+		nextAfterVersion = page.Versions[len(page.Versions)-1].Version
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"namespace":        namespace,
+		"environment":      environment,
+		"versions":         infos,
+		"totalVersions":    page.Total,
+		"nextAfterVersion": nextAfterVersion,
+		"hasMore":          page.HasMore,
+	})
+}
+
+const (
+	defaultHistoryPageSize = 100
+	maxHistoryPageSize     = 100
+)
+
+var cursorVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
+
+func parseHistoryPageSize(raw string) (int, bool) {
+	if !positiveIntegerPattern.MatchString(raw) {
+		return 0, false
+	}
+	size, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || size > maxHistoryPageSize {
+		return 0, false
+	}
+	return int(size), true
+}
+
+func parseHistoryCursor(raw string) (int64, bool) {
+	if !cursorVersionPattern.MatchString(raw) {
+		return 0, false
+	}
+	version, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return version, true
 }
 
 // handleItemHistory returns the change history of one named item across every version of the
