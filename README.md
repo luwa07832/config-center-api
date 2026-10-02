@@ -159,6 +159,39 @@ go run .
 - 值保持服务已保存的原始 JSON 语义：数字、布尔、`null` 和字符串不做类型转换，`1` 与 `1.0`、字符串 `"1"` 不合并。
 - 路径中的 `version` 必须是纯十进制正整数：`0`、负数、带符号数或其他非正整数写法返回 HTTP 400 `INVALID_VERSION`。
 
+### `GET /namespaces/:namespace/environments/:environment/config-versions/:version/lineage`
+
+集中查询一条历史版本的来源链与派生版本，纯只读：不创建版本，不改变生效版本、灰度标签、回滚、晋升与历史顺序；现有发布、提升、回滚、生效配置、历史配置、版本分页、配置项历史、搜索和差异比较入口行为均不变。`namespace`、`environment` 与 `version` 沿用版本快照入口的路径语义，来源关系只依据已保存的 `rollbackOf` 与 `promotionOf` 字段，不从配置内容、创建时间或 `effective` 推断。命中时 HTTP 200：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "version": {"namespace": "payments", "environment": "prod", "version": 4, "grayTag": "canary", "rollbackOf": 1, "promotionOf": null, "createdAt": "2026-10-01T10:15:00Z", "effective": false},
+  "ancestors": [
+    {"namespace": "payments", "environment": "prod", "version": 1, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false, "depth": 1, "relation": "rollback"}
+  ],
+  "descendants": [],
+  "ancestorCount": 1,
+  "descendantCount": 0
+}
+```
+
+- `version` 是命中版本的完整版本信息，`grayTag`、`rollbackOf`、`promotionOf`、`createdAt` 与 `effective` 沿用既有语义；`effective` 始终相对查询时该作用域的当前生效版本判断。
+- `ancestors` 从当前版本逐节点追到最早来源：每个节点存在 `rollbackOf` 时沿回滚关系，否则沿 `promotionOf`；两者都没有时停止。数组按由近及远排列，`depth` 从 1 开始，`relation` 只能是 `rollback` 或 `promotion`。同一节点同时保存两类字段时以 `rollbackOf` 为准。
+- `descendants` 收集通过 `rollbackOf` 或 `promotionOf` 反向可达的全部派生版本，不含当前版本；每个节点在完整版本信息、从 1 开始的 `depth` 与 `relation`（仅 `rollback`/`promotion`）之外，额外携带 `parentVersion`（到达该节点所沿来源边的父版本号）。顺序按 `depth` 升序，同一 `depth` 按 `version` 升序。
+- `ancestorCount` 与 `descendantCount` 分别等于 `ancestors` 与 `descendants` 的数组长度；版本没有来源或派生时对应字段为空数组（不是 `null`）。
+- 关系只在版本所属的同一命名空间与环境内追踪。
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `INVALID_VERSION` | 路径 `version` 不是纯十进制正整数 |
+| 404 | `VERSION_NOT_FOUND` | 该版本号在任何命名空间与环境中都不存在 |
+| 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但属于其他命名空间或环境 |
+| 503 | `storage_unavailable` | 存储不可用 |
+
+判断顺序固定为：先校验路径格式（400），再判断版本号全局是否存在（404），最后判断是否属于路径指定的命名空间与环境（409）。
+
 ### `GET /config-version-diffs?namespace=...&environment=...&baseVersion=1&targetVersion=2`
 
 历史版本差异查询，纯只读，不产生任何落盘记录，也不改变版本历史、灰度状态或回滚记录。也支持路径形式：
