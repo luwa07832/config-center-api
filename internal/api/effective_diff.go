@@ -5,9 +5,10 @@ import (
 	"sort"
 )
 
-// EffectiveConfigChange is one item-level difference between the effective snapshots of two
-// environments. It carries no affectsEffectiveConfig flag because that notion only applies to
-// versions inside a single environment.
+// EffectiveConfigChange is one item-level difference between snapshots that do not share a single
+// environment scope: cross-environment effective configs and cross-environment historical versions.
+// It carries no affectsEffectiveConfig flag because that notion only applies to versions inside a
+// single environment.
 type EffectiveConfigChange struct {
 	Name     string           `json:"name"`
 	Type     string           `json:"changeType"`
@@ -27,12 +28,59 @@ type EffectiveConfigDiffResponse struct {
 	Changes           []EffectiveConfigChange `json:"changes"`
 }
 
+// CrossEnvironmentVersionDiffResponse is the complete result of comparing two historical versions
+// from two environments in one namespace. Both version objects are always present because each
+// referenced version is verified to exist before the comparison runs.
+type CrossEnvironmentVersionDiffResponse struct {
+	Namespace         string                  `json:"namespace"`
+	BaseEnvironment   string                  `json:"baseEnvironment"`
+	BaseVersion       VersionInfo             `json:"baseVersion"`
+	TargetEnvironment string                  `json:"targetEnvironment"`
+	TargetVersion     VersionInfo             `json:"targetVersion"`
+	ChangedCount      int                     `json:"changedCount"`
+	Changes           []EffectiveConfigChange `json:"changes"`
+}
+
 // BuildEffectiveConfigDiff diffs the stored items of two effective snapshots. An empty items
 // map represents a scope without an effective release, so every item on the other side becomes
 // an added or removed change. Changes are ordered by item name.
 func BuildEffectiveConfigDiff(namespace, baseEnvironment, targetEnvironment string,
 	baseVersion, targetVersion *VersionInfo,
 	baseItems, targetItems map[string]json.RawMessage) EffectiveConfigDiffResponse {
+	changes := buildOrderedChanges(baseItems, targetItems)
+	return EffectiveConfigDiffResponse{
+		Namespace:         namespace,
+		BaseEnvironment:   baseEnvironment,
+		TargetEnvironment: targetEnvironment,
+		BaseVersion:       baseVersion,
+		TargetVersion:     targetVersion,
+		ChangedCount:      len(changes),
+		Changes:           changes,
+	}
+}
+
+// BuildCrossEnvironmentVersionDiff diffs the stored items of two historical versions living in two
+// environments. Version numbers are allocated independently per environment, so any base and
+// target numbers are comparable, including baseVersion >= targetVersion. Changes are ordered by
+// item name and carry no affectsEffectiveConfig flag.
+func BuildCrossEnvironmentVersionDiff(namespace string,
+	baseVersion, targetVersion VersionInfo,
+	baseItems, targetItems map[string]json.RawMessage) CrossEnvironmentVersionDiffResponse {
+	changes := buildOrderedChanges(baseItems, targetItems)
+	return CrossEnvironmentVersionDiffResponse{
+		Namespace:         namespace,
+		BaseEnvironment:   baseVersion.Environment,
+		BaseVersion:       baseVersion,
+		TargetEnvironment: targetVersion.Environment,
+		TargetVersion:     targetVersion,
+		ChangedCount:      len(changes),
+		Changes:           changes,
+	}
+}
+
+// buildOrderedChanges merges two item snapshots and returns every difference ordered by item name.
+// added changes only carry newValue, removed only oldValue and modified carry both.
+func buildOrderedChanges(baseItems, targetItems map[string]json.RawMessage) []EffectiveConfigChange {
 	names := make(map[string]struct{}, len(baseItems)+len(targetItems))
 	for name := range baseItems {
 		names[name] = struct{}{}
@@ -55,19 +103,8 @@ func BuildEffectiveConfigDiff(namespace, baseEnvironment, targetEnvironment stri
 			continue
 		}
 		changes = append(changes, EffectiveConfigChange{
-			Name:     change.Name,
-			Type:     change.Type,
-			OldValue: change.OldValue,
-			NewValue: change.NewValue,
+			Name: change.Name, Type: change.Type, OldValue: change.OldValue, NewValue: change.NewValue,
 		})
 	}
-	return EffectiveConfigDiffResponse{
-		Namespace:         namespace,
-		BaseEnvironment:   baseEnvironment,
-		TargetEnvironment: targetEnvironment,
-		BaseVersion:       baseVersion,
-		TargetVersion:     targetVersion,
-		ChangedCount:      len(changes),
-		Changes:           changes,
-	}
+	return changes
 }
