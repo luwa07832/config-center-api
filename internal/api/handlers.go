@@ -14,6 +14,7 @@ import (
 )
 
 var positiveIntegerPattern = regexp.MustCompile(`^[1-9][0-9]*$`)
+var nonNegativeIntegerPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)$`)
 
 type publishRequest struct {
 	GrayTag string                     `json:"grayTag"`
@@ -180,6 +181,64 @@ func (s *server) handleHistory(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace and environment are required")
 		return
 	}
+	rawLimit, hasLimit := c.GetQuery("limit")
+	rawAfter, hasAfter := c.GetQuery("afterVersion")
+	if !hasLimit && !hasAfter {
+		s.handleHistoryFull(c, namespace, environment)
+		return
+	}
+	limit := 100
+	if hasLimit {
+		parsed, ok := parsePageSize(c, rawLimit)
+		if !ok {
+			return
+		}
+		limit = parsed
+	}
+	var afterVersion int64
+	if hasAfter {
+		if !nonNegativeIntegerPattern.MatchString(rawAfter) {
+			writeError(c, http.StatusBadRequest, "INVALID_CURSOR_VERSION", "afterVersion must be a non-negative decimal integer")
+			return
+		}
+		parsed, err := strconv.ParseInt(rawAfter, 10, 64)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "INVALID_CURSOR_VERSION", "afterVersion must be a non-negative decimal integer")
+			return
+		}
+		afterVersion = parsed
+	}
+	page, err := s.store.ListVersionsPage(c.Request.Context(), namespace, environment, afterVersion, limit)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	infos := make([]VersionInfo, 0, len(page.Versions))
+	for _, version := range page.Versions {
+		infos = append(infos, toVersionInfo(version, effectiveVersion))
+	}
+	nextAfterVersion := afterVersion
+	if len(page.Versions) > 0 {
+		nextAfterVersion = page.Versions[len(page.Versions)-1].Version
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"namespace":        namespace,
+		"environment":      environment,
+		"versions":         infos,
+		"totalVersions":    page.TotalVersions,
+		"nextAfterVersion": nextAfterVersion,
+		"hasMore":          page.HasMore,
+	})
+}
+
+// handleHistoryFull keeps the original unpaginated response: no limit or afterVersion was given,
+// so every version is returned ascending with no pagination metadata.
+func (s *server) handleHistoryFull(c *gin.Context, namespace, environment string) {
 	versions, err := s.store.ListVersions(c.Request.Context(), namespace, environment)
 	if err != nil {
 		s.handleStorageError(c, err)
@@ -199,6 +258,19 @@ func (s *server) handleHistory(c *gin.Context) {
 		"environment": environment,
 		"versions":    infos,
 	})
+}
+
+func parsePageSize(c *gin.Context, raw string) (int, bool) {
+	if !positiveIntegerPattern.MatchString(raw) {
+		writeError(c, http.StatusBadRequest, "INVALID_PAGE_SIZE", "limit must be a decimal integer between 1 and 100")
+		return 0, false
+	}
+	limit, err := strconv.Atoi(raw)
+	if err != nil || limit < 1 || limit > 100 {
+		writeError(c, http.StatusBadRequest, "INVALID_PAGE_SIZE", "limit must be a decimal integer between 1 and 100")
+		return 0, false
+	}
+	return limit, true
 }
 
 // handleItemHistory returns the change history of one named item across every version of the

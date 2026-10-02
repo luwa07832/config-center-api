@@ -307,6 +307,52 @@ func (s *Store) ListVersions(ctx context.Context, namespace, environment string)
 	return versions, rows.Err()
 }
 
+// VersionPage is one ascending slice of a scope's version history. TotalVersions counts every
+// version of the scope, independent of the cursor. HasMore reports whether another page follows.
+type VersionPage struct {
+	Versions      []Version
+	TotalVersions int64
+	HasMore       bool
+}
+
+// ListVersionsPage returns at most limit versions strictly greater than afterVersion, ordered by
+// version ascending. One extra row is fetched to decide HasMore without a second scan.
+func (s *Store) ListVersionsPage(ctx context.Context, namespace, environment string,
+	afterVersion int64, limit int) (VersionPage, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
+		 FROM config_versions WHERE namespace = ? AND environment = ? AND version > ?
+		 ORDER BY version ASC LIMIT ?`,
+		namespace, environment, afterVersion, int64(limit)+1)
+	if err != nil {
+		return VersionPage{}, fmt.Errorf("list version page: %w", err)
+	}
+	defer rows.Close()
+	var versions []Version
+	for rows.Next() {
+		v, err := scanVersion(rows)
+		if err != nil {
+			return VersionPage{}, err
+		}
+		versions = append(versions, v)
+	}
+	if err := rows.Err(); err != nil {
+		return VersionPage{}, err
+	}
+	hasMore := false
+	if len(versions) > limit {
+		hasMore = true
+		versions = versions[:limit]
+	}
+	var total int64
+	if err := s.db.QueryRowContext(ctx,
+		"SELECT COUNT(1) FROM config_versions WHERE namespace = ? AND environment = ?",
+		namespace, environment).Scan(&total); err != nil {
+		return VersionPage{}, fmt.Errorf("count versions: %w", err)
+	}
+	return VersionPage{Versions: versions, TotalVersions: total, HasMore: hasMore}, nil
+}
+
 // Items loads the configuration items carried by a version keyed by item name.
 func (s *Store) Items(ctx context.Context, namespace, environment string, version int64) (map[string]json.RawMessage, error) {
 	items, err := loadItems(ctx, s.db, namespace, environment, version)
