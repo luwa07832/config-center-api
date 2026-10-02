@@ -33,6 +33,10 @@ func NewRouter(st *store.Store) *gin.Engine {
 	router.GET("/config-version-diffs", srv.handleVersionDiff)
 	router.GET("/namespaces/:namespace/environments/:environment/config-version-diffs/:base/:target", srv.handleVersionDiff)
 
+	// Cross-environment effective config diff is also read-only.
+	router.GET("/effective-config-diffs", srv.handleEffectiveConfigDiff)
+	router.GET("/namespaces/:namespace/effective-config-diffs/:baseEnvironment/:targetEnvironment", srv.handleEffectiveConfigDiff)
+
 	// Effective configuration and version history for a namespace and environment.
 	router.GET("/effective-configs", srv.handleEffective)
 	router.GET("/config-versions", srv.handleHistory)

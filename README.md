@@ -1,6 +1,6 @@
 # config-center-api
 
-把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本，并比较两个历史版本的配置项差异。
+把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，并对比同一命名空间下两个环境的当前生效配置。
 
 ## 运行要求
 
@@ -139,6 +139,44 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 - 值保留原始 JSON 语义（数字、布尔、`null`、字符串不转换）；仅做对象键排序和空白规范化，因此 `1` 与 `1.0`、`"1"` 与 `1` 仍视为不同。
 - `affectsEffectiveConfig` 表示该差异当前是否体现在生效配置上：灰度目标版本与生效版本不一致的差异为 `false`。
 - 两个版本相同或差异集合为空时返回 HTTP 200 且 `changedCount` 为 0、`changes` 为空数组。
+
+### `GET /effective-config-diffs?namespace=...&baseEnvironment=...&targetEnvironment=...`
+
+跨环境生效配置对比，查询同一命名空间下两个环境当前生效配置的差异。纯只读，不创建版本或审计记录，也不改变发布、灰度、晋升、回滚状态与历史查询结果。也支持等价的路径形式：
+
+```text
+GET /namespaces/:namespace/effective-config-diffs/:baseEnvironment/:targetEnvironment
+```
+
+HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "baseEnvironment": "staging",
+  "targetEnvironment": "prod",
+  "baseVersion": {"namespace": "payments", "environment": "staging", "version": 2, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": true},
+  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": null, "promotionOf": 2, "createdAt": "2026-10-01T10:10:00Z", "effective": true},
+  "changedCount": 2,
+  "changes": [
+    {"name": "retries", "changeType": "modified", "oldValue": "3", "newValue": "5"},
+    {"name": "timeout", "changeType": "added", "newValue": "\"30\""}
+  ]
+}
+```
+
+差异语义：
+
+- `baseVersion` 与 `targetVersion` 沿用历史版本元数据语义（版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt`、`effective`），对应环境没有全量发布时为 `null`。
+- `changes` 按配置项名称字典序排列，`changeType` 固定为 `added`、`removed`、`modified`：`added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；`changedCount` 等于 `changes` 条数。
+- 比较两边生效快照保存的原始 JSON：数字、布尔、`null`、字符串不转换，仅忽略空白与对象键顺序的表示差异，因此 `1` 与 `1.0`、`1` 与 `"1"` 仍视为不同。
+- 两边都没有生效版本时返回 HTTP 200，两个版本字段均为 `null`，`changedCount` 为 0，`changes` 为空数组；仅一边没有生效版本时按空配置计算，另一边的全部配置项记为 `added` 或 `removed`。
+- 该入口固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace`、`baseEnvironment` 或 `targetEnvironment` 为空 |
+| 400 | `SAME_ENVIRONMENT` | `baseEnvironment` 与 `targetEnvironment` 相同 |
 
 ### `GET /config-item-histories?namespace=...&environment=...&name=...`
 

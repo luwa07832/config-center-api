@@ -341,6 +341,58 @@ func (s *server) handleVersionDiff(c *gin.Context) {
 	c.JSON(http.StatusOK, BuildDiff(baseVersion, targetVersion, baseItems, targetItems, effectiveItems, effectiveVersion))
 }
 
+// handleEffectiveConfigDiff compares the current effective snapshots of two environments in one
+// namespace. It is strictly read-only: no version is created and no effective, gray, rollback or
+// history state changes.
+func (s *server) handleEffectiveConfigDiff(c *gin.Context) {
+	namespace := firstNonEmpty(c.Query("namespace"), c.Param("namespace"))
+	baseEnvironment := firstNonEmpty(c.Query("baseEnvironment"), c.Param("baseEnvironment"))
+	targetEnvironment := firstNonEmpty(c.Query("targetEnvironment"), c.Param("targetEnvironment"))
+	if namespace == "" || baseEnvironment == "" || targetEnvironment == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace, baseEnvironment and targetEnvironment are required")
+		return
+	}
+	if baseEnvironment == targetEnvironment {
+		writeError(c, http.StatusBadRequest, "SAME_ENVIRONMENT", "baseEnvironment and targetEnvironment must be different")
+		return
+	}
+	baseVersion, baseItems, err := s.effectiveSnapshot(c, namespace, baseEnvironment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	targetVersion, targetItems, err := s.effectiveSnapshot(c, namespace, targetEnvironment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, BuildEffectiveConfigDiff(namespace, baseEnvironment, targetEnvironment,
+		baseVersion, targetVersion, baseItems, targetItems))
+}
+
+// effectiveSnapshot loads the effective version metadata and items of one scope. A scope without
+// a full release yields a nil version and an empty item map.
+func (s *server) effectiveSnapshot(c *gin.Context, namespace, environment string) (*VersionInfo, map[string]json.RawMessage, error) {
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		return nil, nil, err
+	}
+	items := map[string]json.RawMessage{}
+	if effectiveVersion == 0 {
+		return nil, items, nil
+	}
+	version, err := s.store.GetVersion(c.Request.Context(), namespace, environment, effectiveVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	items, err = s.store.Items(c.Request.Context(), namespace, environment, effectiveVersion)
+	if err != nil {
+		return nil, nil, err
+	}
+	info := toVersionInfo(version, effectiveVersion)
+	return &info, items, nil
+}
+
 // versionAvailable enforces the fixed lookup order: missing globally -> 404, exists outside the
 // requested scope -> 409. A response is only written on failure.
 func (s *server) versionAvailable(c *gin.Context, namespace, environment string, version int64) bool {
