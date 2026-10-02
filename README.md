@@ -370,6 +370,66 @@ HTTP 200 响应：
 | 400 | `INVALID_VALUE_FILTER` | `value` 不是有效 JSON，或与 `present=false` 同时出现 |
 | 503 | `storage_unavailable` | 存储不可用 |
 
+### `GET /config-scopes?namespace=...&environment=...&hasEffective=...&limit=...&afterNamespace=...&afterEnvironment=...`
+
+列出拥有版本历史的全部命名空间与环境组合（作用域），纯只读：不创建版本，也不改变发布、灰度、晋升、回滚或生效状态；现有入口行为不变。
+
+- `namespace`、`environment` 可选，提供非空值时精确筛选；缺省或为空值时不过滤。
+- `hasEffective` 可选，出现时只接受字面量 `true` 或 `false`：`true` 仅返回已有全量生效版本的作用域，`false` 仅返回尚无全量生效版本的作用域（含只有灰度历史者）；缺省时不按生效状态筛选。
+- `limit` 是 1 到 500 的十进制正整数，缺省为 100。
+- `afterNamespace` 与 `afterEnvironment` 必须同时出现且都为非空值，作为组合游标，只返回按 `namespace`、`environment` 升序排在该组合之后的作用域；第一页不传，后续页传上一页响应中的 `nextAfterNamespace` 与 `nextAfterEnvironment`。
+
+结果始终按 `namespace`、`environment` 的 Unicode 码点升序分页。HTTP 200 响应：
+
+```json
+{
+  "matchedCount": 2,
+  "scopes": [
+    {
+      "namespace": "payments",
+      "environment": "prod",
+      "versionCount": 4,
+      "latestVersion": {"namespace": "payments", "environment": "prod", "version": 4, "grayTag": null, "rollbackOf": null, "promotionOf": 2, "createdAt": "2026-10-01T10:10:00Z", "effective": true},
+      "effectiveVersion": 4,
+      "effectiveItemCount": 3,
+      "grayVersionCount": 1,
+      "rollbackVersionCount": 1,
+      "promotionVersionCount": 1
+    },
+    {
+      "namespace": "payments",
+      "environment": "staging",
+      "versionCount": 2,
+      "latestVersion": {"namespace": "payments", "environment": "staging", "version": 2, "grayTag": "beta", "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false},
+      "effectiveVersion": null,
+      "effectiveItemCount": 0,
+      "grayVersionCount": 2,
+      "rollbackVersionCount": 0,
+      "promotionVersionCount": 0
+    }
+  ],
+  "hasMore": false,
+  "nextAfterNamespace": "payments",
+  "nextAfterEnvironment": "staging"
+}
+```
+
+- `matchedCount` 是筛选后的作用域总数（不受分页影响）；`scopes` 是当前页。
+- `latestVersion` 沿用历史版本元数据语义，取该作用域最大版本号，包含版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt` 和 `effective`。
+- `effectiveVersion` 是最新全量发布版本号，没有全量发布时为 `null`。
+- `effectiveItemCount` 统计当前生效快照中的配置项数；没有全量发布时为 0。
+- `grayVersionCount`、`rollbackVersionCount`、`promotionVersionCount` 分别统计灰度标签、`rollbackOf`、`promotionOf` 非空的历史版本数。
+- 无结果（含存储为空或筛选无匹配）时返回 HTTP 200，`matchedCount` 为 0、`scopes` 为空数组、`hasMore` 为 `false`，`nextAfterNamespace` 与 `nextAfterEnvironment` 为 `null`。
+
+该入口固定错误结果（按 `limit`、游标、`hasEffective` 的顺序校验）：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `INVALID_PAGE_SIZE` | `limit` 存在但不是 1 到 500 的十进制正整数（含 0、负数、非数字、空值、大于 500） |
+| 400 | `INVALID_CURSOR` | 只传了 `afterNamespace` 或 `afterEnvironment` 之一，或其中任一为空值 |
+| 400 | `INVALID_EFFECTIVE_FILTER` | `hasEffective` 存在且值不是 `true` 或 `false` |
+| 503 | `storage_unavailable` | 存储不可用 |
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。版本差异查询的固定错误结果如下，不会被替换为空差异或静默忽略：
