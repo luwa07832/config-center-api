@@ -240,6 +240,52 @@ func (s *server) handleItemHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, BuildItemHistory(namespace, environment, name, history, effectiveValue, effectiveHas, effectiveVersion))
 }
 
+// handleEffectiveConfigItemSearch reports the state of one exactly-named item across every scope
+// that owns version history. It is strictly read-only: no version or item row is created and
+// publish, gray, promotion, rollback and other query behavior is unchanged.
+func (s *server) handleEffectiveConfigItemSearch(c *gin.Context) {
+	name, exists := c.GetQuery("name")
+	if !exists || name == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_ITEM_NAME", "name is required")
+		return
+	}
+	var presentFilter *bool
+	if rawPresent, presentExists := c.GetQuery("present"); presentExists {
+		switch rawPresent {
+		case "true":
+			present := true
+			presentFilter = &present
+		case "false":
+			present := false
+			presentFilter = &present
+		default:
+			writeError(c, http.StatusBadRequest, "INVALID_PRESENCE_FILTER", "present must be true or false")
+			return
+		}
+	}
+	var wantValue json.RawMessage
+	if rawValue, valueExists := c.GetQuery("value"); valueExists {
+		if presentFilter != nil && !*presentFilter {
+			writeError(c, http.StatusBadRequest, "INVALID_VALUE_FILTER", "value filter cannot be combined with present=false")
+			return
+		}
+		canonical, ok := canonicalRawJSON(rawValue)
+		if !ok {
+			writeError(c, http.StatusBadRequest, "INVALID_VALUE_FILTER", "value must be valid JSON")
+			return
+		}
+		wantValue = canonical
+	}
+
+	scopes, err := s.store.SearchEffectiveItem(c.Request.Context(),
+		c.Query("namespace"), c.Query("environment"), name)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	c.JSON(http.StatusOK, BuildEffectiveConfigItemSearch(name, scopes, presentFilter, wantValue))
+}
+
 // handleVersionSnapshot returns the complete stored snapshot of one historical version. It is
 // strictly read-only: no version is created and no effective, gray or rollback state changes.
 func (s *server) handleVersionSnapshot(c *gin.Context) {

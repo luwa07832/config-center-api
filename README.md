@@ -249,6 +249,40 @@ HTTP 200 响应：
 | 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 为空 |
 | 400 | `MISSING_ITEM_NAME` | `name` 缺失或为空字符串（纯空白名称视为非空） |
 
+### `GET /effective-config-item-search?name=...&namespace=...&environment=...&present=...&value=...`
+
+全局生效配置项检索：给定一个配置项名称，返回所有已有版本的命名空间与环境组合（包括只有灰度历史、从未全量发布的作用域）下该名称在当前生效快照中的状态。纯只读，不新增任何记录，也不改变发布、灰度、晋升、回滚及其他查询结果。
+
+- `name` 必填，原样按完整名称精确匹配，不裁剪首尾空白，也不做子串匹配；纯空白名称是有效名称。
+- `namespace`、`environment` 可选，提供非空值时精确筛选；缺省或空值不限制。
+- `present` 可选，只接受字面量 `true` 或 `false`：`true` 仅返回生效快照中存在该名称的作用域，`false` 返回不存在该名称的作用域（含只有灰度历史者）；缺省时不按存在性筛选，名称从未出现的作用域仍返回 `present false`。
+- `value` 可选，值本身是一段原始 JSON，按保存值语义精确匹配，仅忽略空白与对象键顺序：`1` 与 `1.0`、`1` 与 `"1"` 均视为不同；JSON `null` 只匹配保存值为 `null` 的生效项，不匹配不存在的作用域。`value` 匹配隐含要求生效项存在且值相同；`value` 与 `present=false` 不能同时出现。
+
+结果按 `namespace`、`environment` 的 Unicode 码点升序排列。HTTP 200 响应：
+
+```json
+{
+  "name": "timeout",
+  "matchedCount": 2,
+  "results": [
+    {"namespace": "payments", "environment": "prod", "effectiveVersion": 3, "effectiveItem": {"present": true, "value": "\"30\""}},
+    {"namespace": "payments", "environment": "staging", "effectiveVersion": null, "effectiveItem": {"present": false}}
+  ]
+}
+```
+
+- `matchedCount` 为过滤后的 `results` 条数；没有任何匹配时为 0、`results` 为空数组。
+- 每项的 `effectiveVersion` 是该作用域最新全量发布版本号，没有全量发布时为 `null`。
+- `effectiveItem` 语义同单项历史：存在时为 `{"present": true, "value": <原样 JSON 值>}`，值为 JSON `null` 时仍带 `"value": null`；不存在时为 `{"present": false}` 且不返回 `value`。
+- 该入口固定错误结果（按 `name`、`present`、`value` 的顺序校验）：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_ITEM_NAME` | `name` 缺失或为空字符串（纯空白名称视为非空） |
+| 400 | `INVALID_PRESENCE_FILTER` | `present` 存在且值不是 `true` 或 `false` |
+| 400 | `INVALID_VALUE_FILTER` | `value` 不是有效 JSON，或与 `present=false` 同时出现 |
+| 503 | `storage_unavailable` | 存储不可用 |
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。版本差异查询的固定错误结果如下，不会被替换为空差异或静默忽略：

@@ -359,6 +359,68 @@ func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name st
 	return history, rows.Err()
 }
 
+// EffectiveItemScope reports the state of one named item in the effective snapshot of a scope.
+// EffectiveVersion is 0 when the scope has never had a full release; HasValue and Value describe
+// the item inside that snapshot, where Value holds the canonical JSON when HasValue is true.
+type EffectiveItemScope struct {
+	Namespace        string
+	Environment      string
+	EffectiveVersion int64
+	HasValue         bool
+	Value            string
+}
+
+// SearchEffectiveItem enumerates every scope that owns at least one version, including scopes
+// with gray-only history, and reports the state of one exactly-named item in each scope's
+// effective snapshot. Optional namespace and environment filters apply exact matching when
+// non-empty. Results are ordered by namespace then environment ascending. It is a single
+// read-only query that never inserts or updates any row.
+func (s *Store) SearchEffectiveItem(ctx context.Context, namespace, environment, name string) ([]EffectiveItemScope, error) {
+	query := `
+WITH effective (namespace, environment, version) AS (
+	SELECT namespace, environment, MAX(version)
+	FROM config_versions
+	WHERE gray_tag IS NULL
+	GROUP BY namespace, environment
+)
+SELECT v.namespace, v.environment, COALESCE(e.version, 0), i.value_json
+FROM (SELECT DISTINCT namespace, environment FROM config_versions) AS v
+LEFT JOIN effective AS e
+  ON e.namespace = v.namespace AND e.environment = v.environment
+LEFT JOIN config_items AS i
+  ON i.namespace = v.namespace AND i.environment = v.environment
+ AND i.version = e.version AND i.name = ?
+ WHERE 1 = 1`
+	args := []any{name}
+	if namespace != "" {
+		query += ` AND v.namespace = ?`
+		args = append(args, namespace)
+	}
+	if environment != "" {
+		query += ` AND v.environment = ?`
+		args = append(args, environment)
+	}
+	query += ` ORDER BY v.namespace ASC, v.environment ASC`
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("search effective item: %w", err)
+	}
+	defer rows.Close()
+	results := []EffectiveItemScope{}
+	for rows.Next() {
+		var entry EffectiveItemScope
+		var value sql.NullString
+		if err := rows.Scan(&entry.Namespace, &entry.Environment, &entry.EffectiveVersion, &value); err != nil {
+			return nil, fmt.Errorf("scan effective item: %w", err)
+		}
+		entry.HasValue = value.Valid
+		entry.Value = value.String
+		results = append(results, entry)
+	}
+	return results, rows.Err()
+}
+
 // EffectiveVersion returns the latest full-release version of a scope. Gray releases never
 // become effective. 0 means no effective snapshot exists.
 func (s *Store) EffectiveVersion(ctx context.Context, namespace, environment string) (int64, error) {
