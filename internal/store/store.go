@@ -435,6 +435,21 @@ func (s *Store) EffectiveVersion(ctx context.Context, namespace, environment str
 	return version, nil
 }
 
+// EffectiveVersionAt returns the full-release version of a scope that was effective at the given
+// moment: the latest version without a gray tag whose created_at is at or before asOf, which must
+// be a UTC RFC3339 second like the stored timestamps so text comparison matches chronological
+// order. Several full releases stamped in the same second resolve to the highest version number.
+// ErrNotFound means the scope had no full release at that time. The query is read-only.
+func (s *Store) EffectiveVersionAt(ctx context.Context, namespace, environment, asOf string) (Version, error) {
+	return s.queryVersion(ctx,
+		`SELECT namespace, environment, version, gray_tag, rollback_of, promotion_of, created_at
+		 FROM config_versions
+		 WHERE namespace = ? AND environment = ? AND gray_tag IS NULL AND created_at <= ?
+		 ORDER BY created_at DESC, version DESC
+		 LIMIT 1`,
+		namespace, environment, asOf)
+}
+
 func (s *Store) queryVersion(ctx context.Context, query string, args ...any) (Version, error) {
 	row := s.db.QueryRowContext(ctx, query, args...)
 	v, err := scanVersion(row)

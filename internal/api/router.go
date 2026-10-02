@@ -42,6 +42,7 @@ func NewRouter(st *store.Store) *gin.Engine {
 
 	// Effective configuration and version history for a namespace and environment.
 	router.GET("/effective-configs", srv.handleEffective)
+	router.GET("/historical-effective-configs", srv.handleHistoricalEffective)
 	router.GET("/config-versions", srv.handleHistory)
 	router.GET("/config-item-histories", srv.handleItemHistory)
 	router.GET("/effective-config-item-search", srv.handleEffectiveConfigItemSearch)

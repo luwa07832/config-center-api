@@ -85,6 +85,33 @@ go run .
 
 返回当前生效（最新全量发布）的版本号、灰度标签与配置项。尚无全量发布时 `effectiveVersion` 与 `grayTag` 为 `null`、`items` 为空对象。命名空间或环境缺失时返回 HTTP 400 `MISSING_SCOPE`。
 
+### `GET /historical-effective-configs?namespace=...&environment=...&asOf=...`
+
+按时间点读取历史生效配置：返回该命名空间与环境下 `createdAt` 小于或等于 `asOf` 的最新全量发布（不带 `grayTag` 的版本）完整快照。纯只读，不创建版本，也不改变生效版本、灰度标签、回滚、晋升和历史顺序。`asOf` 接受 RFC3339 时间并统一换算成 UTC；同一秒存在多个候选全量发布时取版本号最大者。HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "asOf": "2026-10-01T10:05:00Z",
+  "effectiveVersion": 2,
+  "version": {"namespace": "payments", "environment": "prod", "version": 2, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:02:00Z", "effective": true},
+  "items": {"retries": "5", "timeout": "\"30\""}
+}
+```
+
+- `effectiveVersion` 与 `version.version` 一致；`version` 沿用现有版本元数据（`grayTag`、`rollbackOf`、`promotionOf`、`createdAt`、`effective`）。
+- `items` 返回该快照保存的完整配置项，值保持原始 JSON 语义：数字、布尔、`null` 和字符串不做类型转换。
+- `asOf` 早于第一个全量发布、或作用域只有灰度历史而从未全量发布时，`effectiveVersion` 与 `version` 为 `null`、`items` 为空对象；`asOf` 晚于或等于最新创建时间时返回最新全量发布。
+- 普通发布、回滚和晋升产生的全量版本都能按时间点被选中；灰度版本永远不会成为历史生效配置。
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 缺失或为空 |
+| 400 | `MISSING_AS_OF` | `asOf` 缺失或为空 |
+| 400 | `INVALID_TIMESTAMP` | `asOf` 不是合法 RFC3339 时间 |
+| 503 | `storage_unavailable` | 存储不可用 |
+
 ### `GET /config-versions?namespace=...&environment=...`
 
 按版本号升序返回该作用域的历史版本列表，每个版本包含版本号、灰度标签、回滚来源 `rollbackOf`、晋升来源 `promotionOf`、创建时间以及该版本是否为当前生效版本（`effective`）。

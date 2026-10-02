@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -172,6 +173,60 @@ func (s *server) handleEffective(c *gin.Context) {
 		response["items"] = rawMap(items)
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+// handleHistoricalEffective returns the full-release snapshot that was effective in the scope at
+// the requested moment. It is strictly read-only: no version is created and effective, gray,
+// rollback, promotion and history state stay untouched.
+func (s *server) handleHistoricalEffective(c *gin.Context) {
+	namespace, environment := c.Query("namespace"), c.Query("environment")
+	if namespace == "" || environment == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace and environment are required")
+		return
+	}
+	rawAsOf := c.Query("asOf")
+	if rawAsOf == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_AS_OF", "asOf is required")
+		return
+	}
+	parsed, err := time.Parse(time.RFC3339, rawAsOf)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "INVALID_TIMESTAMP", "asOf must be a valid RFC3339 timestamp")
+		return
+	}
+	// Normalize to the same UTC second precision the store stamps on versions, so the stored
+	// created_at text compares chronologically against asOf.
+	asOf := parsed.UTC().Truncate(time.Second).Format(time.RFC3339)
+
+	version, err := s.store.EffectiveVersionAt(c.Request.Context(), namespace, environment, asOf)
+	if errors.Is(err, store.ErrNotFound) {
+		c.JSON(http.StatusOK, gin.H{
+			"namespace":        namespace,
+			"environment":      environment,
+			"asOf":             asOf,
+			"effectiveVersion": nil,
+			"version":          nil,
+			"items":            gin.H{},
+		})
+		return
+	}
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	items, err := s.store.Items(c.Request.Context(), namespace, environment, version.Version)
+	if err != nil {
+		writeError(c, http.StatusServiceUnavailable, "storage_unavailable", "database is not available")
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"namespace":        namespace,
+		"environment":      environment,
+		"asOf":             asOf,
+		"effectiveVersion": version.Version,
+		"version":          toVersionInfo(version, version.Version),
+		"items":            rawMap(items),
+	})
 }
 
 func (s *server) handleHistory(c *gin.Context) {
