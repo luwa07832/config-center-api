@@ -240,6 +240,51 @@ func (s *server) handleItemHistory(c *gin.Context) {
 	c.JSON(http.StatusOK, BuildItemHistory(namespace, environment, name, history, effectiveValue, effectiveHas, effectiveVersion))
 }
 
+// handleEffectiveConfigItemSearch searches every stored scope for the effective state of one
+// item name. It is strictly read-only: no version is created and no effective, gray, rollback
+// or promotion state changes.
+func (s *server) handleEffectiveConfigItemSearch(c *gin.Context) {
+	name := c.Query("name")
+	if name == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_ITEM_NAME", "name is required")
+		return
+	}
+	var wantPresent *bool
+	if raw, given := c.GetQuery("present"); given {
+		switch raw {
+		case "true":
+			present := true
+			wantPresent = &present
+		case "false":
+			present := false
+			wantPresent = &present
+		default:
+			writeError(c, http.StatusBadRequest, "INVALID_PRESENCE_FILTER", "present must be true or false")
+			return
+		}
+	}
+	var wantValue *string
+	if raw, given := c.GetQuery("value"); given {
+		if wantPresent != nil && !*wantPresent {
+			writeError(c, http.StatusBadRequest, "INVALID_VALUE_FILTER", "value must not be combined with present=false")
+			return
+		}
+		canonical, err := store.CanonicalJSON(json.RawMessage(raw))
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "INVALID_VALUE_FILTER", "value must be valid JSON")
+			return
+		}
+		value := string(canonical)
+		wantValue = &value
+	}
+	rows, err := s.store.SearchEffectiveItems(c.Request.Context(), c.Query("namespace"), c.Query("environment"), name)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, BuildEffectiveConfigItemSearch(name, rows, wantPresent, wantValue))
+}
+
 // handleVersionSnapshot returns the complete stored snapshot of one historical version. It is
 // strictly read-only: no version is created and no effective, gray or rollback state changes.
 func (s *server) handleVersionSnapshot(c *gin.Context) {

@@ -46,6 +46,9 @@ func NewRouter(st *store.Store) *gin.Engine {
 	router.GET("/config-item-histories", srv.handleItemHistory)
 	router.GET("/namespaces/:namespace/environments/:environment/config-versions/:version", srv.handleVersionSnapshot)
 
+	// Global effective item search across every stored scope; read-only like the other queries.
+	router.GET("/effective-config-item-search", srv.handleEffectiveConfigItemSearch)
+
 	// Publishing and rollback entry points that feed the stored version history.
 	router.POST("/namespaces/:namespace/environments/:environment/config-versions", srv.handlePublish)
 	router.POST("/namespaces/:namespace/environments/:environment/config-versions/:version/rollback", srv.handleRollback)

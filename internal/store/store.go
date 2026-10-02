@@ -359,6 +359,54 @@ func (s *Store) ItemHistory(ctx context.Context, namespace, environment, name st
 	return history, rows.Err()
 }
 
+// EffectiveItemSearchRow pairs one stored scope with the effective state of a searched item.
+// EffectiveVersion is 0 when the scope only has gray releases. HasValue reports whether the
+// item exists in the effective snapshot; Value holds its canonical JSON when it does.
+type EffectiveItemSearchRow struct {
+	Namespace        string
+	Environment      string
+	EffectiveVersion int64
+	HasValue         bool
+	Value            string
+}
+
+// SearchEffectiveItems lists every namespace and environment combination that has at least one
+// stored version, including scopes with only gray releases, paired with the effective state of
+// one named item. Empty namespace or environment filters mean no restriction. Rows are ordered
+// by namespace then environment. It is a single read-only query that writes nothing.
+func (s *Store) SearchEffectiveItems(ctx context.Context, namespace, environment, name string) ([]EffectiveItemSearchRow, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT s.namespace, s.environment, COALESCE(s.effective_version, 0), i.value_json
+		 FROM (
+		   SELECT namespace, environment,
+		          MAX(CASE WHEN gray_tag IS NULL THEN version END) AS effective_version
+		   FROM config_versions
+		   GROUP BY namespace, environment
+		 ) AS s
+		 LEFT JOIN config_items AS i
+		   ON i.namespace = s.namespace AND i.environment = s.environment
+		  AND i.version = s.effective_version AND i.name = ?
+		 WHERE (? = '' OR s.namespace = ?) AND (? = '' OR s.environment = ?)
+		 ORDER BY s.namespace ASC, s.environment ASC`,
+		name, namespace, namespace, environment, environment)
+	if err != nil {
+		return nil, fmt.Errorf("search effective items: %w", err)
+	}
+	defer rows.Close()
+	matches := []EffectiveItemSearchRow{}
+	for rows.Next() {
+		var row EffectiveItemSearchRow
+		var value sql.NullString
+		if err := rows.Scan(&row.Namespace, &row.Environment, &row.EffectiveVersion, &value); err != nil {
+			return nil, fmt.Errorf("scan effective item search: %w", err)
+		}
+		row.HasValue = value.Valid
+		row.Value = value.String
+		matches = append(matches, row)
+	}
+	return matches, rows.Err()
+}
+
 // EffectiveVersion returns the latest full-release version of a scope. Gray releases never
 // become effective. 0 means no effective snapshot exists.
 func (s *Store) EffectiveVersion(ctx context.Context, namespace, environment string) (int64, error) {
@@ -409,7 +457,7 @@ func storeItems(ctx context.Context, conn *sql.Conn, namespace, environment stri
 	}
 	sort.Strings(names)
 	for _, name := range names {
-		value, err := canonicalJSON(items[name])
+		value, err := CanonicalJSON(items[name])
 		if err != nil {
 			return "", fmt.Errorf("canonical value of %q: %w", name, err)
 		}
@@ -454,9 +502,9 @@ func nullString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: true}
 }
 
-// canonicalJSON re-encodes raw JSON so whitespace and object key order never cause false diffs,
+// CanonicalJSON re-encodes raw JSON so whitespace and object key order never cause false diffs,
 // while number, boolean, null and string semantics are preserved.
-func canonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
+func CanonicalJSON(raw json.RawMessage) (json.RawMessage, error) {
 	decoder := json.NewDecoder(bytesReader(raw))
 	decoder.UseNumber()
 	var value any

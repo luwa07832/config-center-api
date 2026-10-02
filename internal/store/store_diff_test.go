@@ -126,7 +126,7 @@ func TestGetVersionDistinguishesMissingAndOtherScope(t *testing.T) {
 func TestCanonicalJSONPreservesValueSemantics(t *testing.T) {
 	cases := []string{`1`, `1.5`, `true`, `false`, `null`, `"text"`, `[]`, `{"b":1,"a":2}`}
 	for _, raw := range cases {
-		canonical, err := canonicalJSON(json.RawMessage(raw))
+		canonical, err := CanonicalJSON(json.RawMessage(raw))
 		if err != nil {
 			t.Fatalf("canonical %s: %v", raw, err)
 		}
@@ -134,17 +134,17 @@ func TestCanonicalJSONPreservesValueSemantics(t *testing.T) {
 			t.Fatalf("empty canonical for %s", raw)
 		}
 	}
-	a, _ := canonicalJSON(json.RawMessage(`{"b": 1, "a": 2}`))
-	b, _ := canonicalJSON(json.RawMessage(`{"a":2,"b":1}`))
+	a, _ := CanonicalJSON(json.RawMessage(`{"b": 1, "a": 2}`))
+	b, _ := CanonicalJSON(json.RawMessage(`{"a":2,"b":1}`))
 	if string(a) != string(b) {
 		t.Fatalf("object key order must canonicalize: %s vs %s", a, b)
 	}
-	n1, _ := canonicalJSON(json.RawMessage(`1`))
-	n2, _ := canonicalJSON(json.RawMessage(`1.0`))
+	n1, _ := CanonicalJSON(json.RawMessage(`1`))
+	n2, _ := CanonicalJSON(json.RawMessage(`1.0`))
 	if string(n1) == string(n2) {
 		t.Fatalf("1 and 1.0 must keep distinct number semantics")
 	}
-	if _, err := canonicalJSON(json.RawMessage(`not-json`)); err == nil {
+	if _, err := CanonicalJSON(json.RawMessage(`not-json`)); err == nil {
 		t.Fatalf("invalid JSON must be rejected")
 	}
 }

@@ -1,6 +1,6 @@
 # config-center-api
 
-把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，对比同一命名空间下两个环境的当前生效配置，并比较同一命名空间下两个环境各自历史版本的差异。
+把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，对比同一命名空间下两个环境的当前生效配置，比较同一命名空间下两个环境各自历史版本的差异，并全局检索同名配置项在各作用域的当前生效状态。
 
 ## 运行要求
 
@@ -248,6 +248,38 @@ HTTP 200 响应：
 |---|---|---|
 | 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 为空 |
 | 400 | `MISSING_ITEM_NAME` | `name` 缺失或为空字符串（纯空白名称视为非空） |
+
+### `GET /effective-config-item-search?name=...`
+
+全局生效配置项检索：在未知作用域的情况下按完整名称查找同名配置项的当前生效状态。纯只读，不新增版本，也不改变发布、灰度、晋升、回滚或其他查询的结果。`name` 原样按完整名称精确匹配，不裁剪首尾空白。HTTP 200 响应：
+
+```json
+{
+  "name": "timeout",
+  "matchedCount": 2,
+  "results": [
+    {"namespace": "orders", "environment": "prod", "effectiveVersion": null, "effectiveItem": {"present": false}},
+    {"namespace": "payments", "environment": "prod", "effectiveVersion": 3, "effectiveItem": {"present": true, "value": "\"30\""}}
+  ]
+}
+```
+
+检索语义：
+
+- 覆盖已有版本的全部命名空间与环境组合，包括只有灰度历史、尚无全量发布的作用域；`results` 按 `namespace`、`environment` 的 Unicode 码点升序。
+- `matchedCount` 为 `results` 条数；每项含 `namespace`、`environment`、`effectiveVersion`、`effectiveItem`。
+- `effectiveVersion` 是该作用域最新全量发布版本号，只有灰度历史时为 `null`。
+- `effectiveItem` 语义同单项历史：存在时为 `{"present": true, "value": <原样 JSON 值>}`，值为 JSON `null` 时 `value` 仍是 `null`；不存在时为 `{"present": false}` 且不返回 `value`。
+- `namespace`、`environment` 可选，精确筛选作用域；缺省或空值不限制。
+- `present` 只接受 `true` 或 `false`：`true` 只保留生效项存在的作用域，`false` 只保留生效项不存在的作用域；缺省不限制。
+- `value` 可选，为一段原始 JSON，按保存值语义精确匹配（仅忽略空白与对象键顺序，`1` 与 `1.0`、`1` 与 `"1"` 不同），只返回生效项存在且相同的作用域；不得与 `present=false` 同时出现。
+- 该入口固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_ITEM_NAME` | `name` 缺失或为空字符串（纯空白名称视为非空） |
+| 400 | `INVALID_PRESENCE_FILTER` | `present` 不是 `true` 或 `false` |
+| 400 | `INVALID_VALUE_FILTER` | `value` 不是有效 JSON，或与 `present=false` 同时出现 |
 
 ## 错误约定
 
