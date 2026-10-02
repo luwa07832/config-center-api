@@ -201,6 +201,58 @@ func (s *server) handleHistory(c *gin.Context) {
 	})
 }
 
+// handleEffectiveConfigDiff powers the cross-environment effective configuration comparison.
+// Scope comes from the query string or the equivalent path parameters. The query is strictly
+// read-only: it never creates a version or changes effective, gray, rollback, or history state.
+func (s *server) handleEffectiveConfigDiff(c *gin.Context) {
+	namespace := firstNonEmpty(c.Query("namespace"), c.Param("namespace"))
+	baseEnvironment := firstNonEmpty(c.Query("baseEnvironment"), c.Param("baseEnvironment"))
+	targetEnvironment := firstNonEmpty(c.Query("targetEnvironment"), c.Param("targetEnvironment"))
+	if namespace == "" || baseEnvironment == "" || targetEnvironment == "" {
+		writeError(c, http.StatusBadRequest, "MISSING_SCOPE", "namespace, baseEnvironment and targetEnvironment are required")
+		return
+	}
+	if baseEnvironment == targetEnvironment {
+		writeError(c, http.StatusBadRequest, "SAME_ENVIRONMENT", "baseEnvironment and targetEnvironment must be different")
+		return
+	}
+	baseVersion, baseItems, ok := s.effectiveSnapshot(c, namespace, baseEnvironment)
+	if !ok {
+		return
+	}
+	targetVersion, targetItems, ok := s.effectiveSnapshot(c, namespace, targetEnvironment)
+	if !ok {
+		return
+	}
+	c.JSON(http.StatusOK, BuildEffectiveConfigDiff(namespace, baseEnvironment, targetEnvironment,
+		baseVersion, baseItems, targetVersion, targetItems))
+}
+
+// effectiveSnapshot loads the effective version metadata and items of one environment. The
+// version is nil when the environment has no full release yet; its side then compares as an
+// empty configuration. ok is false only when a storage error response was already written.
+func (s *server) effectiveSnapshot(c *gin.Context, namespace, environment string) (*store.Version, map[string]json.RawMessage, bool) {
+	effectiveVersion, err := s.store.EffectiveVersion(c.Request.Context(), namespace, environment)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return nil, nil, false
+	}
+	if effectiveVersion == 0 {
+		return nil, map[string]json.RawMessage{}, true
+	}
+	version, err := s.store.GetVersion(c.Request.Context(), namespace, environment, effectiveVersion)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return nil, nil, false
+	}
+	items, err := s.store.Items(c.Request.Context(), namespace, environment, effectiveVersion)
+	if err != nil {
+		s.handleStorageError(c, err)
+		return nil, nil, false
+	}
+	return &version, items, true
+}
+
 // handleItemHistory returns the change history of one named item across every version of the
 // scope. It is strictly read-only and never creates a version or changes effective state.
 func (s *server) handleItemHistory(c *gin.Context) {

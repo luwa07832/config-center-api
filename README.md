@@ -1,6 +1,6 @@
 # config-center-api
 
-把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本，并比较两个历史版本的配置项差异。
+把命名空间下的配置项、版本号、灰度标签和回滚版本记录成可查询的服务，支持按命名空间与环境读取生效配置、查看历史版本、比较两个历史版本的配置项差异，以及比较同一命名空间下两个环境当前生效配置的差异。
 
 ## 运行要求
 
@@ -140,6 +140,44 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 - `affectsEffectiveConfig` 表示该差异当前是否体现在生效配置上：灰度目标版本与生效版本不一致的差异为 `false`。
 - 两个版本相同或差异集合为空时返回 HTTP 200 且 `changedCount` 为 0、`changes` 为空数组。
 
+### `GET /effective-config-diffs?namespace=...&baseEnvironment=...&targetEnvironment=...`
+
+跨环境生效配置对比：比较同一命名空间下两个环境当前生效（最新全量发布）的配置快照。纯只读，不创建版本或审计记录，也不改变发布、灰度、晋升、回滚与历史查询的结果。也支持等价的路径形式：
+
+```text
+GET /namespaces/:namespace/effective-config-diffs/:baseEnvironment/:targetEnvironment
+```
+
+HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "baseEnvironment": "staging",
+  "targetEnvironment": "prod",
+  "baseVersion": {"namespace": "payments", "environment": "staging", "version": 2, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": true},
+  "targetVersion": {"namespace": "payments", "environment": "prod", "version": 3, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:10:00Z", "effective": true},
+  "changedCount": 2,
+  "changes": [
+    {"name": "retries", "changeType": "modified", "oldValue": "3", "newValue": "5"},
+    {"name": "timeout", "changeType": "added", "newValue": "\"30\""}
+  ]
+}
+```
+
+差异语义：
+
+- `baseVersion` 与 `targetVersion` 沿用历史版本元数据语义（版本号、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt`、`effective`），分别是两个环境当前的生效版本；没有全量发布的一侧为 `null`。
+- `changes` 按配置项名称字典序排列，`changeType` 固定为 `added`、`removed`、`modified`：`added` 只返回 `newValue`，`removed` 只返回 `oldValue`，`modified` 同时返回两者；`changedCount` 等于 `changes` 条数。
+- 比较两边生效快照保存的原始 JSON：数字、布尔、`null` 和字符串不转换，仅忽略空白与对象键顺序的表示差异，因此 `1` 与 `1.0`、`"1"` 与 `1` 仍视为不同。
+- 两边都没有生效版本时返回 HTTP 200，两个版本字段均为 `null`，`changedCount` 为 0，`changes` 为空数组；仅一边没有生效版本时，该侧按空配置计算 `added` 或 `removed`。
+- 该入口固定错误结果：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace`、`baseEnvironment` 或 `targetEnvironment` 为空 |
+| 400 | `SAME_ENVIRONMENT` | `baseEnvironment` 与 `targetEnvironment` 相同 |
+
 ### `GET /config-item-histories?namespace=...&environment=...&name=...`
 
 单项配置历史查询，纯只读，不新增版本，也不改变生效版本、灰度标签、回滚记录或历史顺序。`name` 原样使用，不裁剪首尾空白。HTTP 200 响应：
@@ -189,3 +227,5 @@ GET /namespaces/:namespace/environments/:environment/config-version-diffs/:base/
 | 409 | `VERSION_SCOPE_MISMATCH` | 版本存在，但属于其他命名空间或环境 |
 
 历史快照读取（`GET .../config-versions/:version`）复用同一套版本查找顺序：版本号在任何命名空间与环境中都不存在时返回 404 `VERSION_NOT_FOUND`；版本号存在但属于其他命名空间或环境时返回 409 `VERSION_SCOPE_MISMATCH`；路径段不是纯十进制正整数时返回 400 `INVALID_VERSION`。
+
+跨环境生效配置对比（`GET /effective-config-diffs` 及其路径形式）的固定错误结果：`namespace`、`baseEnvironment`、`targetEnvironment` 任一缺失返回 400 `MISSING_SCOPE`，两个环境相同返回 400 `SAME_ENVIRONMENT`；其他读取失败沿用统一存储错误响应。
