@@ -430,6 +430,50 @@ HTTP 200 响应：
 | 400 | `INVALID_EFFECTIVE_FILTER` | `hasEffective` 存在且值不是 `true` 或 `false` |
 | 503 | `storage_unavailable` | 存储不可用 |
 
+### `GET /config-version-records?namespace=...&environment=...&grayTag=...&rollbackOf=...&effective=...&limit=...&afterVersion=...`
+
+按筛选条件检索一个命名空间与环境的历史版本，每条结果携带该版本保存的完整快照。纯只读：不创建版本，也不改变生效、灰度、晋升、回滚或历史顺序；现有 `GET /config-versions`、版本快照、配置项历史、有效配置、历史有效配置、差异、谱系以及发布、晋升、回滚入口行为均不变。
+
+- `namespace` 与 `environment` 必填，共同限定作用域；任一缺失或为空返回 HTTP 400 `MISSING_SCOPE`。
+- `grayTag` 可选：出现时必须是非空值，精确匹配带该非空灰度标签的版本；显式传空值返回 HTTP 400 `INVALID_GRAY_TAG`；省略时不按灰度标签筛选。
+- `rollbackOf` 可选：只接受纯十进制正整数，仅匹配 `rollbackOf` 等于该版本号的版本；`0`、负数、非数字等非法写法返回 HTTP 400 `INVALID_ROLLBACK_SOURCE`；省略时不按回滚来源筛选。
+- `effective` 可选：只接受字面量 `true` 或 `false`。`true` 仅返回当前生效版本（该作用域最新全量发布，没有全量发布时无匹配）；`false` 返回除当前生效版本外的全部版本（只有灰度历史时这些版本都算非生效）；其他值返回 HTTP 400 `INVALID_EFFECTIVE_FILTER`；省略时不按生效状态筛选。
+- 所有筛选项可单用或任意组合，组合时取交集；全部省略时返回该作用域的全部版本。
+- 分页沿用现有历史分页口径：结果始终按版本号升序；`limit` 缺省 100，范围 1 到 100；`afterVersion` 只接受纯十进制非负整数，只返回该版本号之后的匹配版本，第一页不传。
+
+HTTP 200 响应：
+
+```json
+{
+  "namespace": "payments",
+  "environment": "prod",
+  "matchedCount": 4,
+  "versions": [
+    {"version": 1, "grayTag": null, "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:00:00Z", "effective": false, "items": {"b": "true", "a": "\"1\""}},
+    {"version": 2, "grayTag": "canary", "rollbackOf": null, "promotionOf": null, "createdAt": "2026-10-01T10:05:00Z", "effective": false, "items": {"a": "\"2\""}}
+  ],
+  "hasMore": true,
+  "nextAfterVersion": 2
+}
+```
+
+- `matchedCount` 是筛选后该作用域的匹配版本总数（不受分页影响）；`versions` 是当前页。
+- 每条 `versions` 元素包含版本号 `version`、`grayTag`、`rollbackOf`、`promotionOf`、`createdAt`、`effective` 和该版本完整快照 `items`；`effective` 相对查询时的当前生效版本判断。
+- `items` 保持保存时的原始 JSON 语义：数字、布尔、`null` 和字符串不做类型转换，`1` 与 `1.0`、字符串 `"1"` 不合并；空快照返回空对象 `{}`。
+- `hasMore` 表示当前页之后是否还有匹配版本；`nextAfterVersion` 是本页最后一条的版本号。`matchedCount` 为 0 时 `nextAfterVersion` 为 0；匹配总数不为 0 但本页为空（如 `afterVersion` 已越过最后一条）时 `nextAfterVersion` 沿用请求中的 `afterVersion`。
+
+该入口固定错误结果（按作用域、`grayTag`、`rollbackOf`、`effective`、`limit`、`afterVersion` 的顺序校验）：
+
+| HTTP | code | 触发条件 |
+|---|---|---|
+| 400 | `MISSING_SCOPE` | `namespace` 或 `environment` 缺失或为空 |
+| 400 | `INVALID_GRAY_TAG` | 显式传入空的 `grayTag` |
+| 400 | `INVALID_ROLLBACK_SOURCE` | `rollbackOf` 存在但不是纯十进制正整数 |
+| 400 | `INVALID_EFFECTIVE_FILTER` | `effective` 存在且值不是 `true` 或 `false` |
+| 400 | `INVALID_PAGE_SIZE` | `limit` 存在但不是 1 到 100 的十进制正整数 |
+| 400 | `INVALID_CURSOR_VERSION` | `afterVersion` 存在但不是纯十进制非负整数 |
+| 503 | `storage_unavailable` | 存储不可用 |
+
 ## 错误约定
 
 所有错误响应都是单个顶层 `error` 对象，包含 `code` 与 `message` 两个字符串字段；`message` 不包含 SQL、堆栈或文件路径。版本差异查询的固定错误结果如下，不会被替换为空差异或静默忽略：
